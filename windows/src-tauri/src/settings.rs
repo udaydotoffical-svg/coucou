@@ -20,10 +20,74 @@ pub struct Settings {
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
+    /// "anthropic" or "openai" (any OpenAI-compatible endpoint).
+    #[serde(default = "default_provider")]
+    pub ai_provider: String,
+    /// Base URL of an OpenAI-compatible API, e.g. https://api.openai.com/v1.
+    #[serde(default)]
+    pub ai_base_url: String,
+    /// Width of the open island, logical px.
+    #[serde(default = "default_island_width")]
+    pub island_width: f64,
+    /// Height added to (or, when negative, taken from) the open island's text
+    /// views, logical px.
+    #[serde(default)]
+    pub island_height_extra: f64,
+    /// Height of the closed (compact) island, logical px.
+    #[serde(default = "default_compact_height")]
+    pub compact_height: f64,
+    /// Open when the pointer rests on the island, close when it leaves.
+    #[serde(default)]
+    pub open_on_hover: bool,
+    /// When off, the island never closes or hides by itself.
+    #[serde(default = "yes")]
+    pub auto_hide: bool,
+    #[serde(default = "yes")]
+    pub always_on_top: bool,
+    #[serde(default)]
+    pub show_in_taskbar: bool,
 }
+
+pub const ISLAND_WIDTH_MIN: f64 = 560.0;
+pub const ISLAND_WIDTH_MAX: f64 = 1100.0;
+pub const COMPACT_HEIGHT_MIN: f64 = 16.0;
+pub const COMPACT_HEIGHT_MAX: f64 = 48.0;
+pub const ISLAND_HEIGHT_EXTRA_MIN: f64 = -60.0;
+pub const ISLAND_HEIGHT_EXTRA_MAX: f64 = 200.0;
 
 fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
+}
+
+fn default_provider() -> String {
+    "anthropic".into()
+}
+
+fn default_compact_height() -> f64 {
+    32.0
+}
+
+fn default_island_width() -> f64 {
+    640.0
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Settings {
+    /// Keeps hand-edited or stale values inside what the island can draw.
+    pub fn sanitized(mut self) -> Self {
+        self.island_width = self.island_width.clamp(ISLAND_WIDTH_MIN, ISLAND_WIDTH_MAX);
+        self.island_height_extra =
+            self.island_height_extra.clamp(ISLAND_HEIGHT_EXTRA_MIN, ISLAND_HEIGHT_EXTRA_MAX);
+        self.compact_height = self.compact_height.clamp(COMPACT_HEIGHT_MIN, COMPACT_HEIGHT_MAX);
+        if self.ai_provider != "openai" {
+            self.ai_provider = default_provider();
+        }
+        self.ai_base_url = self.ai_base_url.trim().to_string();
+        self
+    }
 }
 
 impl Default for Settings {
@@ -43,6 +107,15 @@ impl Default for Settings {
             autostart: false,
             hooks_installed: false,
             model: default_model(),
+            ai_provider: default_provider(),
+            ai_base_url: String::new(),
+            island_width: default_island_width(),
+            island_height_extra: 0.0,
+            compact_height: default_compact_height(),
+            open_on_hover: false,
+            auto_hide: true,
+            always_on_top: true,
+            show_in_taskbar: false,
         }
     }
 }
@@ -59,7 +132,9 @@ fn settings_path() -> PathBuf {
 
 pub fn load() -> Settings {
     match std::fs::read(settings_path()) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Ok(bytes) => serde_json::from_slice::<Settings>(&bytes)
+            .unwrap_or_default()
+            .sanitized(),
         Err(_) => Settings::default(),
     }
 }

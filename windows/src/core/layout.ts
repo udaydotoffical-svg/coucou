@@ -53,6 +53,35 @@ export interface ViewLayout {
 export const PANEL_W = 720;
 export const PANEL_H = 320;
 
+/** Settings that decide how big the open island is. */
+export interface IslandSizing {
+  islandWidth: number;
+  islandHeightExtra: number;
+  /** Height of the closed island; the default is NOTCH_H. */
+  compactHeight: number;
+}
+
+export const ISLAND_WIDTH_MIN = 560;
+export const ISLAND_WIDTH_MAX = 1100;
+export const COMPACT_HEIGHT_MIN = 16;
+export const COMPACT_HEIGHT_MAX = 48;
+export const ISLAND_HEIGHT_EXTRA_MIN = -60;
+export const ISLAND_HEIGHT_EXTRA_MAX = 200;
+
+/** Window size for the chosen island size — src-tauri/src/island.rs `panel_size`. */
+export function panelSize(s: IslandSizing): { w: number; h: number } {
+  return { w: Math.max(PANEL_W, s.islandWidth + 80), h: PANEL_H + Math.max(0, s.islandHeightExtra) };
+}
+
+/** How far a view can be squeezed: the header, the fixed 84 px card and the padding. */
+const MIN_VIEW_HEIGHT: Partial<Record<IslandViewName, number>> = { prompt: 180, mail: 180 };
+const DEFAULT_MIN_VIEW_HEIGHT = 136;
+
+/** The drop and greeting animations are drawn at a fixed 640 px: they keep it. */
+const FIXED_SIZE_VIEWS: ReadonlySet<IslandViewName> = new Set([
+  "greeting", "upload", "uploading", "choose",
+]);
+
 // No notch on a PC: these are the hidden/compact sizes from docs/SPEC.md.
 export const NOTCH_W = 184;
 export const NOTCH_H = 32;
@@ -101,6 +130,7 @@ export function islandSize(
   mode: IslandMode,
   view: IslandViewName,
   chatCount = 0,
+  sizing: IslandSizing = { islandWidth: EXPANDED_W, islandHeightExtra: 0, compactHeight: NOTCH_H },
 ): { w: number; h: number } {
   switch (mode) {
     case "hidden":
@@ -108,10 +138,12 @@ export function islandSize(
       // slides into the top edge of the screen instead of sitting there as a bar.
       return { w: NOTCH_W, h: 0 };
     case "compact":
-      return { w: COMPACT_W, h: NOTCH_H };
+      return { w: COMPACT_W, h: sizing.compactHeight };
     case "expanded": {
-      const h = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
-      return { w: EXPANDED_W, h };
+      const base = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
+      if (FIXED_SIZE_VIEWS.has(view)) return { w: EXPANDED_W, h: base };
+      const floor = MIN_VIEW_HEIGHT[view] ?? DEFAULT_MIN_VIEW_HEIGHT;
+      return { w: sizing.islandWidth, h: Math.max(floor, base + sizing.islandHeightExtra) };
     }
   }
 }
@@ -129,12 +161,16 @@ export function botPosition(
   view: IslandViewName,
   islandH: number,
   uploadProgress = 0,
+  compactHeight = NOTCH_H,
 ): BotPlacement {
   switch (mode) {
     case "hidden":
       return { cx: 46, cy: 16, diameter: 6, opacity: 0 };
-    case "compact":
-      return { cx: 40, cy: 16, diameter: 20, opacity: 1 };
+    case "compact": {
+      // Mochi and the pills beside it keep their proportions in a taller or shorter pill.
+      const c = compactHeight / NOTCH_H;
+      return { cx: 40 * c, cy: compactHeight / 2, diameter: 20 * c, opacity: 1 };
+    }
     case "expanded": {
       const layout = VIEW_LAYOUTS[view];
       if (view === "uploading") {

@@ -61,12 +61,17 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
-    let (screen_changed, autostart_changed) = {
+    let settings = settings.sanitized();
+    let (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
         let autostart_changed = current.autostart != settings.autostart;
+        let size_changed = current.island_width != settings.island_width
+            || current.island_height_extra != settings.island_height_extra;
+        let on_top_changed = current.always_on_top != settings.always_on_top;
+        let taskbar_changed = current.show_in_taskbar != settings.show_in_taskbar;
         *current = settings.clone();
-        (screen_changed, autostart_changed)
+        (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed)
     };
     if let Err(err) = settings::save(&settings) {
         eprintln!("[coucou] could not save settings: {err}");
@@ -78,9 +83,21 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
             eprintln!("[coucou] autostart: {err}");
         }
     }
-    if screen_changed {
+    if taskbar_changed {
+        if let Some(win) = island::window(&app) {
+            // The style only takes effect when the window is shown again.
+            let _ = win.hide();
+            platform::set_taskbar_visible(&win, settings.show_in_taskbar);
+            let _ = win.show();
+            island::enforce_taskbar_style_soon(&app);
+        }
+    }
+    if screen_changed || size_changed || on_top_changed || taskbar_changed {
         let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
         island::apply_geometry(&app, &settings.screen, collapsed);
+        if size_changed {
+            island::refresh_click_through(&app, &shared.gate);
+        }
     }
     // Keep the other window in step (island ⇄ settings window).
     let _ = app.emit("settings-changed", settings);
@@ -241,8 +258,15 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    let cfg = {
+        let s = shared.settings.lock().unwrap();
+        claude::AiConfig {
+            provider: s.ai_provider.clone(),
+            base_url: s.ai_base_url.clone(),
+            model: s.model.clone(),
+        }
+    };
+    claude::send(&chat, &cfg, query, context).await
 }
 
 #[tauri::command]
@@ -410,8 +434,10 @@ pub fn run() {
 
             if let Some(win) = island::window(&handle) {
                 platform::make_non_activating(&win);
+                platform::set_taskbar_visible(&win, loaded.show_in_taskbar);
                 island::apply_geometry(&handle, &loaded.screen, false);
                 let _ = win.show();
+                island::enforce_taskbar_style_soon(&handle);
             }
             gate.collapsed.store(false, Ordering::Relaxed);
             // Nothing drawn yet, so nothing takes the mouse until the page

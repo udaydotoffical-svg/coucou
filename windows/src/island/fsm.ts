@@ -18,6 +18,14 @@ export class IslandStateMachine {
   greetHoverCollapseDelay = 10;
   /** An alert waiting for an answer stays open, even when the mouse leaves. */
   pinned = false;
+  /** Off: the island never closes (open → compact) or hides (compact → hidden) on its own. */
+  autoHide = true;
+  /** On: resting the pointer on the island opens it, and leaving closes it again. */
+  openOnHover = false;
+  /** Seconds the pointer may be away before a hover-opened island closes. */
+  hoverCloseDelay = 0.35;
+  /** Lets the owner keep the island open while the pointer is away (typing in the chat…). */
+  hoverCloseGuard: () => boolean = () => true;
 
   private petitHide: number | null = null;
   private homeCollapse: number | null = null;
@@ -38,6 +46,10 @@ export class IslandStateMachine {
         break;
       case "petit":
         this.clear("petitHide");
+        if (this.openOnHover) {
+          this.cancelTimers();
+          this.transition("home");
+        }
         break;
       case "home":
         this.clear("homeCollapse");
@@ -48,7 +60,8 @@ export class IslandStateMachine {
     }
   }
 
-  mouseLeft() {
+  /** `real` is false when the owner reports a leave the pointer did not make (an alert opened it elsewhere). */
+  mouseLeft(real = true) {
     switch (this.state) {
       case "hidden":
         break;
@@ -56,7 +69,8 @@ export class IslandStateMachine {
         this.schedulePetitHide();
         break;
       case "home":
-        this.scheduleHomeCollapse();
+        if (real && this.openOnHover && !this.pinned && this.hoverCloseGuard()) this.scheduleHoverClose();
+        else this.scheduleHomeCollapse();
         break;
       case "coucou":
         this.clear("greetCollapse");
@@ -104,17 +118,34 @@ export class IslandStateMachine {
 
   // ── Timers ──────────────────────────────────────────────────────────────────
 
+  setAutoHide(on: boolean) {
+    this.autoHide = on;
+    if (!on) {
+      this.clear("petitHide");
+      this.clear("homeCollapse");
+    }
+  }
+
   private schedulePetitHide() {
     this.clear("petitHide");
+    if (!this.autoHide) return;
     this.petitHide = window.setTimeout(() => {
       this.petitHide = null;
       if (this.state === "petit") this.transition("hidden");
     }, this.petitToHiddenDelay * 1000);
   }
 
+  private scheduleHoverClose() {
+    this.clear("homeCollapse");
+    this.homeCollapse = window.setTimeout(() => {
+      this.homeCollapse = null;
+      if (this.state === "home") this.transition("petit");
+    }, this.hoverCloseDelay * 1000);
+  }
+
   private scheduleHomeCollapse() {
     this.clear("homeCollapse");
-    if (this.pinned) return;
+    if (this.pinned || !this.autoHide) return;
     this.homeCollapse = window.setTimeout(() => {
       this.homeCollapse = null;
       if (this.state === "home") this.transition("petit");

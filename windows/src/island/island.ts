@@ -4,9 +4,9 @@
 import { Tracked, Spring, clamp } from "../core/anim";
 import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
-  EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
+  EXPANDED_CORNER, EXPANDED_W, NOTCH_H, NOTCH_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
-  islandSize,
+  islandSize, panelSize,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
@@ -225,6 +225,11 @@ export class Island {
 
   private wireFsm() {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
+    this.fsm.setAutoHide(State.settings.autoHide);
+    this.fsm.openOnHover = State.settings.openOnHover;
+    // Keep the chat, a file drop or an alert open while the pointer is away.
+    this.fsm.hoverCloseGuard = () =>
+      State.view !== "prompt" && !State.fileDragOver && !UploadSeq.isActive;
     this.fsm.onTransition = (from, to) => {
       switch (to) {
         case "hidden":
@@ -235,11 +240,11 @@ export class Island {
           else if (from === "hidden") Sound.play("peek");
           this.setMode("compact");
           if (from === "coucou") State.view = State.defaultView();
-          if (!this.wasInIsland) this.fsm.mouseLeft();
+          if (!this.wasInIsland) this.fsm.mouseLeft(false);
           break;
         case "home":
           this.expand(State.defaultView());
-          if (!this.wasInIsland) this.fsm.mouseLeft();
+          if (!this.wasInIsland) this.fsm.mouseLeft(false);
           break;
         case "coucou":
           this.expand("greeting");
@@ -450,8 +455,8 @@ export class Island {
   // ── Geometry ────────────────────────────────────────────────────────────────
 
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
-    const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
+    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, State.settings);
+    const r = State.mode === "expanded" ? EXPANDED_CORNER : Math.min(ROUNDED_CORNER, h / 2);
     return { w, h, r };
   }
 
@@ -479,12 +484,15 @@ export class Island {
     this.islandEl.style.transform = `translateX(-50%)`;
     // These follow the island as it resizes, so they belong here rather than in
     // the state-driven DOM sync.
-    this.miniGrid.style.left = `${w - 40 - 14.5}px`;
-    this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
+    const c = State.settings.compactHeight / NOTCH_H;
+    this.miniGrid.style.transformOrigin = "0 0";
+    this.miniGrid.style.transform = `scale(${c})`;
+    this.miniGrid.style.left = `${w - 54.5 * c}px`;
+    this.miniGrid.style.top = `${hh / 2 - 14.5 * c}px`;
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
-    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    const rect = { x: (this.panel.w - w) / 2, y: 0, w, h: hh };
     const p = this.pushedRect;
     if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
@@ -492,11 +500,16 @@ export class Island {
     }
   }
 
-  /** Island rect in window coordinates (origin top-left of the 720×320 window). */
+  /** Island rect in window coordinates (origin top-left of the window). */
   private islandRect(): { x: number; y: number; w: number; h: number } {
     const w = this.width.value;
     const hh = this.height.value;
-    return { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    return { x: (this.panel.w - w) / 2, y: 0, w, h: hh };
+  }
+
+  /** The window's logical size, which follows the island size in the settings. */
+  private get panel() {
+    return panelSize(State.settings);
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ────────────────
@@ -592,7 +605,7 @@ export class Island {
     }
     if (!inIsland && this.wasInIsland) {
       this.fsm.mouseLeft();
-      if (this.fsm.state === "home" && !State.isPinned) {
+      if (this.fsm.state === "home" && !State.isPinned && State.settings.autoHide) {
         this.homeCollapseAt = performance.now() + State.settings.autoCloseInterval * 1000;
       }
     }
@@ -744,7 +757,10 @@ export class Island {
   };
 
   private updateBotTargets() {
-    const p = botPosition(State.mode, State.view, this.height.value, State.uploadProgress);
+    const p = botPosition(
+      State.mode, State.view, this.height.value, State.uploadProgress,
+      State.settings.compactHeight,
+    );
     this.botCx.target = p.cx;
     this.botCy.target = p.cy;
     this.botSize.target = p.diameter / 0.6;
@@ -885,11 +901,16 @@ export class Island {
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
+    this.fsm.setAutoHide(State.settings.autoHide);
+    this.fsm.openOnHover = State.settings.openOnHover;
+    if (!State.settings.autoHide) this.homeCollapseAt = null;
+    // The island size is a setting: follow it without waiting for the next view change.
+    this.animateGeometry(false);
     State.notify();
   }
 
   get panelSize() {
-    return { w: PANEL_W, h: PANEL_H };
+    return this.panel;
   }
 
   get chatHeight() {

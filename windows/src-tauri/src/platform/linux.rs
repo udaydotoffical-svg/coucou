@@ -263,6 +263,14 @@ pub fn make_non_activating(win: &WebviewWindow) {
     crate::log::line("island is a layer-shell overlay");
 }
 
+/// Taskbar entry on or off. A layer-shell overlay has none to begin with.
+pub fn set_taskbar_visible(win: &WebviewWindow, show: bool) {
+    let _ = win.set_skip_taskbar(!show);
+}
+
+/// Windows needs its style bits put back after tao rewrites them; GTK has none.
+pub fn enforce_taskbar_style(_win: &WebviewWindow, _show: bool) {}
+
 /// Temporarily allow keyboard focus so a text field inside the island can be
 /// typed in.
 pub fn set_activating(win: &WebviewWindow, activating: bool) {

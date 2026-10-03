@@ -16,7 +16,7 @@ use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetClassNameW, GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW,
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 use super::LocalTime;
@@ -215,6 +215,34 @@ pub fn make_non_activating(win: &WebviewWindow) {
         let want = ex | WS_EX_NOACTIVATE.0 as isize | WS_EX_TOOLWINDOW.0 as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
     }
+}
+
+/// Writes the two extended-style bits that decide whether shells list the
+/// window: WS_EX_TOOLWINDOW (keeps it out of the taskbar, Alt-Tab and docks such
+/// as Seelen UI) and WS_EX_APPWINDOW (forces it in). Only writes on a change.
+///
+/// tao rebuilds the whole extended style from its own flags every time one of
+/// them flips — click-through, always-on-top, show/hide — and it always adds
+/// WS_EX_APPWINDOW to a top-level window. That silently undoes this, so the
+/// island calls it again after each of those (see island.rs).
+pub fn enforce_taskbar_style(win: &WebviewWindow, show: bool) {
+    let Some(hwnd) = hwnd_of(win) else { return };
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let tool = WS_EX_TOOLWINDOW.0 as isize;
+        let app = WS_EX_APPWINDOW.0 as isize;
+        let want = if show { (ex & !tool) | app } else { (ex | tool) & !app };
+        if want != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+        }
+    }
+}
+
+/// Taskbar button on or off. Showing it means swapping WS_EX_TOOLWINDOW for
+/// WS_EX_APPWINDOW; it takes effect the next time the window is shown.
+pub fn set_taskbar_visible(win: &WebviewWindow, show: bool) {
+    enforce_taskbar_style(win, show);
+    let _ = win.set_skip_taskbar(!show);
 }
 
 /// Temporarily allow activation so a text field inside the island can be typed in.

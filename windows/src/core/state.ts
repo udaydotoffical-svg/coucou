@@ -90,8 +90,24 @@ export interface Settings {
   screen: "primary" | "cursor";
   autostart: boolean;
   hooksInstalled: boolean;
-  /** Claude model used by the chat. */
+  /** Model used by the chat (a Claude model, or whatever the endpoint serves). */
   model: string;
+  /** "anthropic" = the Claude API; "openai" = any OpenAI-compatible endpoint. */
+  aiProvider: "anthropic" | "openai";
+  /** Base URL of the OpenAI-compatible API, e.g. https://api.openai.com/v1. */
+  aiBaseUrl: string;
+  /** Width of the open island, logical px. */
+  islandWidth: number;
+  /** Height added to (or, when negative, taken from) the open island's text views, logical px. */
+  islandHeightExtra: number;
+  /** Height of the closed (compact) island, logical px. */
+  compactHeight: number;
+  /** Open when the pointer rests on the island, close when it leaves. */
+  openOnHover: boolean;
+  /** When off, the island never closes or hides by itself. */
+  autoHide: boolean;
+  alwaysOnTop: boolean;
+  showInTaskbar: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -106,6 +122,15 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  aiProvider: "anthropic",
+  aiBaseUrl: "",
+  islandWidth: 640,
+  islandHeightExtra: 0,
+  compactHeight: 32,
+  openOnHover: false,
+  autoHide: true,
+  alwaysOnTop: true,
+  showInTaskbar: false,
 };
 
 type Listener = () => void;

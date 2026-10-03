@@ -60,22 +60,22 @@ function lastPathComponent(p: string): string {
   return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
 }
 
-/** frenchStep() — same labels as the macOS app. */
+/** Short label shown for each Claude Code tool step. */
 const TOOL_LABELS: Record<string, string> = {
-  Bash: "Exécute",
-  Read: "Lit",
-  Write: "Écrit",
-  Edit: "Modifie",
-  Glob: "Cherche",
-  Grep: "Recherche",
-  WebSearch: "Recherche web",
-  WebFetch: "Récupère",
-  TodoWrite: "Tâches",
+  Bash: "Running",
+  Read: "Reading",
+  Write: "Writing",
+  Edit: "Editing",
+  Glob: "Finding",
+  Grep: "Searching",
+  WebSearch: "Web search",
+  WebFetch: "Fetching",
+  TodoWrite: "Tasks",
   Task: "Agent",
-  LS: "Liste",
-  MultiEdit: "Modifie",
+  LS: "Listing",
+  MultiEdit: "Editing",
   NotebookEdit: "Notebook",
-  PowerShell: "Exécute",
+  PowerShell: "Running",
 };
 
 function stepLabel(tool: string, input: Record<string, unknown>): string {

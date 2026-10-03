@@ -14,9 +14,40 @@ use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize
 
 use crate::platform::{self, cursor_physical, left_button_down};
 
-/// Logical size of the full window — the largest island view, like the macOS panel.
+/// Logical size of the full window at the default island size — the largest
+/// island view, like the macOS panel. A bigger island grows the window with it
+/// (see `panel_size`); src/core/layout.ts `panelSize` must stay in step.
 pub const PANEL_W: f64 = 720.0;
 pub const PANEL_H: f64 = 320.0;
+
+/// Window size for the island size chosen in the settings.
+pub fn panel_size(s: &crate::settings::Settings) -> (f64, f64) {
+    (PANEL_W.max(s.island_width + 80.0), PANEL_H + s.island_height_extra.max(0.0))
+}
+
+fn current_panel_size(app: &AppHandle) -> (f64, f64) {
+    app.try_state::<crate::Shared>()
+        .map(|s| panel_size(&s.settings.lock().unwrap()))
+        .unwrap_or((PANEL_W, PANEL_H))
+}
+
+/// Puts the island's taskbar-related window style back (see
+/// `platform::enforce_taskbar_style`). Cheap and idempotent.
+pub fn enforce_taskbar_style(app: &AppHandle) {
+    let Some(win) = window(app) else { return };
+    let show = app
+        .try_state::<crate::Shared>()
+        .map(|s| s.settings.lock().unwrap().show_in_taskbar)
+        .unwrap_or(false);
+    platform::enforce_taskbar_style(&win, show);
+}
+
+/// Same, queued behind whatever window change was just requested: those run on
+/// the main thread, and the style has to be restored after them, not before.
+pub fn enforce_taskbar_style_soon(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || enforce_taskbar_style(&handle));
+}
 /// Logical size of the invisible strip that wakes the island when it is hidden.
 pub const STRIP_W: f64 = 240.0;
 pub const STRIP_H: f64 = 6.0;
@@ -157,7 +188,7 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let mp = *m.position();
     let ms = *m.size();
 
-    let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
+    let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { current_panel_size(app) };
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
     let x = mp.x + (ms.width as i32 - pw as i32) / 2;
@@ -174,7 +205,12 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let _ = win.set_position(PhysicalPosition::new(x, y));
     // Moving across displays can rescale the window: re-assert the physical size.
     let _ = win.set_size(PhysicalSize::new(pw, ph));
-    let _ = win.set_always_on_top(true);
+    let on_top = app
+        .try_state::<crate::Shared>()
+        .map(|s| s.settings.lock().unwrap().always_on_top)
+        .unwrap_or(true);
+    let _ = win.set_always_on_top(on_top);
+    enforce_taskbar_style_soon(app);
 }
 
 /// Position, size and scale of the monitor the island lives on. Any change here
@@ -215,6 +251,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // is already running, so this costs one monitor query.
                 ticks = ticks.wrapping_add(1);
                 if ticks % screen_every == 0 {
+                    enforce_taskbar_style(&app);
                     let now = current_screen_key(&app);
                     if now.is_some() && now != last_screen {
                         let first = last_screen.is_none();
@@ -234,7 +271,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 let y = (cy - origin.y as f64) / scale;
                 let size = match win.inner_size() {
                     Ok(s) => (s.width as f64 / scale, s.height as f64 / scale),
-                    Err(_) => (PANEL_W, PANEL_H),
+                    Err(_) => current_panel_size(&app),
                 };
                 if (x - last.0).abs() < 1.0 && (y - last.1).abs() < 1.0 {
                     continue;
@@ -277,6 +314,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 if gate.ignoring.load(Ordering::Relaxed) == accept {
                     gate.ignoring.store(!accept, Ordering::Relaxed);
                     let _ = win.set_ignore_cursor_events(!accept);
+                    enforce_taskbar_style_soon(&app);
                 }
 
                 let _ = win.emit("cursor", CursorPayload { x, y });
@@ -321,5 +359,6 @@ pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
 pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
     if let Some(win) = window(app) {
         let _ = win.set_ignore_cursor_events(ignore);
+        enforce_taskbar_style_soon(app);
     }
 }
