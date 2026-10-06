@@ -4,20 +4,23 @@
 import { Tracked, Spring, clamp } from "../core/anim";
 import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
-  EXPANDED_CORNER, EXPANDED_W, NOTCH_H, NOTCH_W,
+  EXPANDED_CORNER, EXPANDED_W, KNOWURA_RADIUS, NOTCH_H, NOTCH_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
   islandSize, panelSize,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
-import { State } from "../core/state";
+import { dominantColor, DEFAULT_COLOR } from "../core/color";
+import { degrees, weatherIcon, weatherLabel } from "../views/weather";
+import { State, type MusicInfo } from "../core/state";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
 import { UploadCanvas } from "../upload/canvas";
 import { USC, UploadSeq } from "../upload/sequence";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
-import { h } from "../views/dom";
+import { h, svg } from "../views/dom";
+import { ICONS } from "../views/icons";
 import { IslandStateMachine } from "./fsm";
 
 const BOT_OVERHANG = 40;
@@ -46,6 +49,12 @@ export class Island {
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
+  private knowuraLoading!: HTMLElement;
+  private musicArt!: HTMLElement;
+  private privacyDot!: HTMLElement;
+  private notchWeather!: HTMLElement;
+  private notchWeatherKey = "";
+  private musicArtUrl = "";
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
@@ -167,6 +176,7 @@ export class Island {
       },
       openSettingsWindow: () => void Bridge.openSettingsWindow(),
       blip: () => Sound.play("blip"),
+      musicControl: (action) => void Bridge.musicControl(action),
     };
 
     this.wakeStrip = h("div", { id: "wake-strip" });
@@ -175,6 +185,11 @@ export class Island {
     this.greetingCanvas = h("canvas", { id: "greeting-canvas" });
     this.miniGrid = h("div", { id: "mini-grid" });
     this.countdown = h("div", { id: "countdown" });
+    this.knowuraLoading = h("div", { id: "knowura-loading" }, h("i"), h("i"), h("i"));
+    // No cover (yet): a music note stands in for it.
+    this.musicArt = h("div", { id: "music-art", class: "noart" }, svg(ICONS.note, 14));
+    this.privacyDot = h("div", { id: "privacy-dot" });
+    this.notchWeather = h("div", { id: "notch-weather" });
 
     this.header = buildHeader(actions);
     this.views = buildViews(actions, () => this.animateGeometry(false));
@@ -209,6 +224,10 @@ export class Island {
       this.botCanvas,
       this.miniGrid,
       this.countdown,
+      this.knowuraLoading,
+      this.musicArt,
+      this.notchWeather,
+      this.privacyDot,
     );
 
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -227,6 +246,9 @@ export class Island {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.setAutoHide(State.settings.autoHide);
     this.fsm.openOnHover = State.settings.openOnHover;
+    // A playing track keeps the closed island on screen, with its album art.
+    this.fsm.holdVisible = () =>
+      State.settings.showMusicOnNotch && !!State.music?.active && !!State.music.playing;
     // Keep the chat, a file drop or an alert open while the pointer is away.
     this.fsm.hoverCloseGuard = () =>
       State.view !== "prompt" && !State.fileDragOver && !UploadSeq.isActive;
@@ -280,6 +302,7 @@ export class Island {
     }
     this.updateWindowCollapsed();
     this.animateGeometry(modeOrder(mode) < modeOrder(prev));
+    this.syncPin();
     State.notify();
   }
 
@@ -293,17 +316,124 @@ export class Island {
     if (UploadSeq.isActive && !UPLOAD_VIEWS.has(view)) UploadSeq.deactivate();
   }
 
+  /**
+   * In Knowura mode the chat is the hosted Knowura assistant, shown in a window
+   * of its own: every way into the chat view opens that instead, and the island
+   * goes back to its pill underneath it.
+   */
+  private redirectChat(view: IslandViewName): boolean {
+    if (view !== "prompt" || State.settings.assistantMode !== "knowura") return false;
+    // "Ask a question" about a dropped file: Knowura gets the file in its composer.
+    if (State.droppedFile?.path && UPLOAD_VIEWS.has(State.view)) {
+      void Bridge.knowuraAttach(State.droppedFile.path);
+      State.droppedFile = null;
+      State.promptContext = null;
+    } else {
+      void Bridge.knowuraOpen("text");
+    }
+    return true;
+  }
+
+  /**
+   * The file-drop views hold the island open: moving the pointer away, the auto-close
+   * timer and a click elsewhere leave it alone. It lets go as soon as you switch to
+   * the chat or the dashboard, and from then on closes the usual ways.
+   */
+  private syncPin() {
+    const hold = State.mode === "expanded" && UPLOAD_VIEWS.has(State.view);
+    const pinned = State.isPinned || hold;
+    if (this.fsm.pinned === pinned) return;
+    this.fsm.pinned = pinned;
+    if (pinned) {
+      this.fsm.cancelTimers();
+      this.homeCollapseAt = null;
+    } else if (this.fsm.state === "home" && !this.wasInIsland && !State.knowuraOpen) {
+      this.fsm.mouseLeft(false);
+    }
+  }
+
+  /** A mouse press outside the island: close it, unless something is holding it open. */
+  outsidePress() {
+    if (!State.settings.closeOnClickOutside) return;
+    if (State.mode !== "expanded" || State.isPinned || this.fsm.pinned || State.knowuraOpen) return;
+    if (State.fileDragOver) return;
+    this.collapse();
+  }
+
+  /** The camera or microphone started or stopped being used. */
+  privacyChanged(p: { camera: boolean; mic: boolean }) {
+    if (State.privacy.camera === p.camera && State.privacy.mic === p.mic) return;
+    State.privacy = { camera: p.camera, mic: p.mic };
+    State.notify();
+  }
+
+  /** What is playing changed: the art on the closed island, the player in the overview. */
+  musicChanged(next: MusicInfo) {
+    const was = !!State.music?.active && !!State.music.playing;
+    const hadPlayer = !!State.music?.active;
+    // A new cover: find its main colour (the player and the closed island's art wear it).
+    const artKey = next.art ? `${next.app}|${next.title}|${next.art.length}` : "";
+    if (artKey !== State.musicColorFor) {
+      State.musicColorFor = artKey;
+      if (!next.art) State.musicColor = null;
+      else {
+        void dominantColor(next.art).then((c) => {
+          if (State.musicColorFor !== artKey) return;
+          State.musicColor = c;
+          State.notify();
+        });
+      }
+    }
+    State.music = next;
+    State.musicAt = performance.now();
+    const now = next.active && next.playing;
+    if (State.settings.showMusicOnNotch && !State.knowuraOpen) {
+      // A track started: the closed island comes out to show it.
+      if (now && !was) this.fsm.reveal();
+      // It stopped: the island may go back to hiding.
+      if (!now && was && this.fsm.state === "petit" && !this.wasInIsland) this.fsm.mouseLeft(false);
+    }
+    // The overview is taller with the player in it: grow or shrink as it comes and goes.
+    if (hadPlayer !== !!next.active && State.mode === "expanded" && State.view === "overview") {
+      this.animateGeometry(false);
+    }
+    State.notify();
+  }
+
+  /** Rust: Knowura is opening. The notch springs out to hold it and stops reacting to the pointer. */
+  knowuraShow() {
+    State.knowuraOpen = true;
+    this.fsm.locked = true;
+    this.fsm.cancelTimers();
+    this.homeCollapseAt = null;
+    State.isPinned = false;
+    this.fsm.pinned = false;
+    this.alert("knowura");
+  }
+
+  /** Rust: Knowura closed. The notch shrinks back to its pill and behaves normally again. */
+  knowuraHide() {
+    State.knowuraOpen = false;
+    this.fsm.locked = false;
+    this.fsm.forcePetit();
+    State.view = State.defaultView();
+    State.notify();
+  }
+
   expand(view: IslandViewName) {
+    if (this.redirectChat(view)) return;
     this.stopSequenceIfLeaving(view);
     State.view = view;
     if (State.mode !== "expanded") this.setMode("expanded");
     else this.animateGeometry(false);
     State.lastActivity = performance.now();
     this.homeCollapseAt = null;
+    this.syncPin();
     State.notify();
   }
 
   setView(view: IslandViewName) {
+    if (this.redirectChat(view)) return;
     this.stopSequenceIfLeaving(view);
     if (State.mode !== "expanded") {
       this.fsm.forceHome();
@@ -316,6 +446,7 @@ export class Island {
     State.view = view;
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
+    this.syncPin();
     State.notify();
   }
 
@@ -455,17 +586,27 @@ export class Island {
   // ── Geometry ────────────────────────────────────────────────────────────────
 
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, State.settings);
-    const r = State.mode === "expanded" ? EXPANDED_CORNER : Math.min(ROUNDED_CORNER, h / 2);
+    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, State.settings, !!State.music?.active);
+    const r =
+      State.mode === "expanded"
+        ? State.view === "knowura" ? KNOWURA_RADIUS : EXPANDED_CORNER
+        : Math.min(ROUNDED_CORNER, h / 2);
     return { w, h, r };
   }
 
   private animateGeometry(shrinking: boolean) {
     const { w, h, r } = this.targetSize();
     if (shrinking) {
-      this.width.curveTowards(w);
-      this.height.curveTowards(h);
-      this.radius.curveTowards(r);
+      const closing = this.height.value > 300;
+      this.width.curveTowards(w, closing ? 420 : 340);
+      this.height.curveTowards(h, closing ? 420 : 340);
+      this.radius.curveTowards(r, closing ? 420 : 340);
+    } else if (State.mode === "expanded" && State.view === "knowura") {
+      // Dynamic-Island feel: the width springs out first and the height follows a
+      // beat later with a softer settle, so the shape stretches rather than scales.
+      this.width.springTo(w, 0.44, 0.74);
+      this.height.springTo(h, 0.62, 0.8);
+      this.radius.springTo(r, 0.5, 0.82);
     } else {
       this.width.springTo(w);
       this.height.springTo(h);
@@ -489,6 +630,21 @@ export class Island {
     this.miniGrid.style.transform = `scale(${c})`;
     this.miniGrid.style.left = `${w - 54.5 * c}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5 * c}px`;
+    this.musicArt.style.transformOrigin = "0 0";
+    this.musicArt.style.transform = `scale(${c})`;
+    this.musicArt.style.left = `${w - 51.5 * c}px`;
+    this.musicArt.style.top = `${hh / 2 - 13 * c}px`;
+    // The weather symbol stands in the same spot as the album art and the small pills.
+    this.notchWeather.style.transformOrigin = "0 0";
+    this.notchWeather.style.transform = `scale(${c})`;
+    this.notchWeather.style.left = `${w - 51.5 * c}px`;
+    this.notchWeather.style.top = `${hh / 2 - 13 * c}px`;
+    // The camera / microphone dot sits at the right edge, level with the bar.
+    const dc = State.mode === "expanded" ? 1 : c;
+    this.privacyDot.style.transformOrigin = "0 0";
+    this.privacyDot.style.transform = `scale(${dc})`;
+    this.privacyDot.style.left = `${w - 16 * dc}px`;
+    this.privacyDot.style.top = `${Math.min(hh, 34 * dc) / 2 - 3.5 * dc}px`;
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
@@ -541,12 +697,14 @@ export class Island {
     // The wake strip is the only thing the OS can hit while the island is hidden.
     this.wakeStrip.addEventListener("mouseenter", () => {
       Sound.resume();
+      if (State.knowuraOpen) return;
       if (State.mode === "hidden") this.fsm.mouseEntered();
     });
 
     this.islandEl.addEventListener("mousedown", (e) => {
       Sound.resume();
       State.lastActivity = performance.now();
+      if (State.knowuraOpen) return;
       if (State.mode !== "expanded") {
         this.fsm.click();
         return;
@@ -558,7 +716,7 @@ export class Island {
     });
 
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned) this.collapse();
+      if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned && !State.knowuraOpen) this.collapse();
       State.lastActivity = performance.now();
     });
 
@@ -605,7 +763,7 @@ export class Island {
     }
     if (!inIsland && this.wasInIsland) {
       this.fsm.mouseLeft();
-      if (this.fsm.state === "home" && !State.isPinned && State.settings.autoHide) {
+      if (this.fsm.state === "home" && !State.isPinned && State.settings.autoHide && !State.knowuraOpen && !this.fsm.pinned) {
         this.homeCollapseAt = performance.now() + State.settings.autoCloseInterval * 1000;
       }
     }
@@ -767,10 +925,10 @@ export class Island {
 
     const greetingActive = State.mode === "expanded" && State.view === "greeting";
     // The drop canvas draws its own Mochi; two of them would overlap.
-    const visible = p.opacity > 0 && !greetingActive && !this.uploadActive;
+    const visible = p.opacity > 0 && !greetingActive && !this.uploadActive && State.view !== "knowura";
     this.botCanvas.style.opacity = visible ? "1" : "0";
 
-    if (State.mode === "expanded" && State.view !== "uploading" && !greetingActive && !this.uploadActive) {
+    if (State.mode === "expanded" && State.view !== "uploading" && State.view !== "knowura" && !greetingActive && !this.uploadActive) {
       const d = p.diameter;
       const color = botGlowColor(State.effectiveState);
       this.botGlow.style.display = "block";
@@ -817,6 +975,10 @@ export class Island {
         this.engine.slotHVel = 0;
       }
     }
+    // Mochi puts headphones on while music plays, in the cover's colour.
+    this.engine.headphones =
+      State.settings.mochiHeadphones && !!State.music?.active && !!State.music.playing;
+    this.engine.phoneAccent = State.musicColor;
     this.engine.update(dt);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, hCss);
@@ -852,8 +1014,10 @@ export class Island {
     const expanded = State.mode === "expanded";
     const greetingActive = expanded && State.view === "greeting";
 
-    this.contentEl.style.opacity = expanded && !greetingActive ? "1" : "0";
-    this.contentEl.style.pointerEvents = expanded && !greetingActive ? "auto" : "none";
+    const mochiContent = expanded && !greetingActive && State.view !== "knowura";
+    this.contentEl.style.opacity = mochiContent ? "1" : "0";
+    this.contentEl.style.pointerEvents = mochiContent ? "auto" : "none";
+    this.knowuraLoading.style.opacity = expanded && State.view === "knowura" ? "1" : "0";
     this.greetingCanvas.style.display = greetingActive ? "block" : "none";
 
     this.header.sync();
@@ -877,11 +1041,45 @@ export class Island {
     }
 
     // Compact mini grid
-    const showGrid = State.mode === "compact";
+    // Camera in use: green. Microphone only: orange. Both: green.
+    const { camera, mic } = State.privacy;
+    this.privacyDot.className = camera ? "camera" : mic ? "mic" : "";
+    this.privacyDot.style.opacity = (camera || mic) && State.mode !== "hidden" ? "1" : "0";
+    this.privacyDot.title = camera ? "Camera in use" : "Microphone in use";
+
+    // While music plays the album art takes the place of the small pills.
+    const musicOn =
+      State.mode === "compact" && State.settings.showMusicOnNotch &&
+      !!State.music?.active && !!State.music.playing;
+    this.musicArt.style.opacity = musicOn ? "1" : "0";
+    this.musicArt.style.setProperty("--p", (State.musicColor ?? DEFAULT_COLOR).join(" "));
+    const art = State.music?.art ?? "";
+    if (art !== this.musicArtUrl) {
+      this.musicArtUrl = art;
+      this.musicArt.style.backgroundImage = art ? `url("${art}")` : "";
+      this.musicArt.classList.toggle("noart", !art);
+    }
+    const pillsShown =
+      State.mode === "compact" && State.settings.showMiniPills && !musicOn && State.otherTasks.length > 0;
+    const showGrid = pillsShown;
+
+    // Closed, with no music and no small pills: just the weather symbol, nothing else.
+    const w = State.weather;
+    const weatherOn =
+      State.mode === "compact" && State.settings.showWeather && !!w && !musicOn && !pillsShown;
+    this.notchWeather.style.opacity = weatherOn ? "1" : "0";
+    if (w) {
+      const wk = `${w.code}|${w.isDay}`;
+      if (wk !== this.notchWeatherKey) {
+        this.notchWeatherKey = wk;
+        this.notchWeather.replaceChildren(weatherIcon(w.code, w.isDay, 24));
+      }
+      this.notchWeather.title = `${w.place} · ${degrees(w.temp)} · ${weatherLabel(w.code)}`;
+    }
     this.miniGrid.style.opacity = showGrid ? "1" : "0";
     if (showGrid) {
       const others = State.otherTasks.slice(0, 4);
-      const key = others.map((t) => t.id).join("|");
+      const key = others.map((t) => `${t.id}:${t.color}`).join("|");
       if (this.miniGrid.dataset.key !== key) {
         this.miniGrid.dataset.key = key;
         this.miniGrid.replaceChildren();

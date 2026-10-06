@@ -10,7 +10,14 @@
 ; of this app goes out of its way not to do. A relay that is gone exits 0 without
 ; printing anything, so a leftover entry costs nothing beyond a dead path.
 
+; Knowura AI in the Start menu: the same program, opened straight onto the full
+; Knowura app window (coucou.exe --knowura), like any other Windows app.
+!macro NSIS_HOOK_POSTINSTALL
+  CreateShortcut "$SMPROGRAMS\Knowura AI.lnk" "$INSTDIR\coucou.exe" "--knowura" "$INSTDIR\knowura.ico" 0
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
+  Delete "$SMPROGRAMS\Knowura AI.lnk"
   RMDir /r "$LOCALAPPDATA\Coucou\bin"
   RMDir /r "$LOCALAPPDATA\Coucou\inbox"
   Delete "$LOCALAPPDATA\Coucou\coucou.log"

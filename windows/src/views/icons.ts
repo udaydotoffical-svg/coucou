@@ -38,4 +38,14 @@ export const ICONS = {
   stack: "M5 8h14v11.5H5V8zm1.8-3h10.4v1.6H6.8V5zm1.6-2.6h7.2V4H8.4V2.4z",
   // doc.text
   doc: "M6.5 2.6h7l4 4v14.8h-11V2.6zm6.6 1.6v3.3h3.3l-3.3-3.3zM8.6 11h6.8v1.5H8.6V11zm0 3.4h6.8v1.5H8.6v-1.5z",
+  // music player
+  play: "M8 5.2v13.6L19 12 8 5.2z",
+  pause: "M7 5h3.6v14H7V5zm6.4 0H17v14h-3.6V5z",
+  skipNext: "M6 5.5v13l8.5-6.5L6 5.5zM16 5.5h2.2v13H16v-13z",
+  skipPrev: "M18 5.5v13l-8.5-6.5L18 5.5zM5.8 5.5H8v13H5.8v-13z",
+  // shuffle / repeat are line icons: draw them with the svg() stroke option
+  shuffle: "M16 3h5v5 M4 20 21 3 M21 16v5h-5 M15 15l6 6 M4 4l5 5",
+  repeat: "M17 1l4 4-4 4 M3 11V9a4 4 0 0 1 4-4h14 M7 23l-4-4 4-4 M21 13v2a4 4 0 0 1-4 4H3",
+  repeatOne: "M17 1l4 4-4 4 M3 11V9a4 4 0 0 1 4-4h14 M7 23l-4-4 4-4 M21 13v2a4 4 0 0 1-4 4H3 M11.2 9.6l1.3-.9v5.6",
+  note: "M9.5 3.5v12.2A3.6 3.6 0 1 0 11.3 19V8.2l6.9-1.5v6.7a3.6 3.6 0 1 0 1.8 3.1V3.4L9.5 3.5z",
 } as const;

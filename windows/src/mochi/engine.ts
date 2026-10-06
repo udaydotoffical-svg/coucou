@@ -180,6 +180,13 @@ export class BotEngine {
   /** Extra canvas height above the body so hearts can fly out without clipping. */
   particleOverhang = 0;
 
+  /** Headphones on (music playing): they slide on, and the cups bob to a beat. Not for mini bots. */
+  headphones = false;
+  /** The ring colour of the ear cups, 0-255 (the album cover's colour); null = indigo. */
+  phoneAccent: readonly [number, number, number] | null = null;
+  private hp = 0;
+  private phonePhase = 0;
+
   // Mouth spring (fraction of R)
   slotH = 0; slotHTarget = 0; slotHVel = 0; isChewing = false;
 
@@ -459,6 +466,7 @@ export class BotEngine {
       this.particles.length > 0 ||
       this.cfg.bounces || this.cfg.scans || this.cfg.breathes || this.cfg.zz || this.cfg.sweat ||
       this.isMini ||
+      this.headphones || this.hp > 0.002 ||
       Math.abs(this.tgYaw - this.yaw) > 0.002 ||
       Math.abs(this.tgPitch - this.pitch) > 0.002 ||
       Math.abs(this.tgTilt - this.tilt) > 0.002 ||
@@ -486,6 +494,11 @@ export class BotEngine {
   update(dt: number) {
     const n = now();
     const nowMs = performance.now();
+
+    const phonesTarget = this.headphones && !this.isMini ? 1 : 0;
+    this.hp += (phonesTarget - this.hp) * Math.min(1, dt * 7);
+    if (Math.abs(phonesTarget - this.hp) < 0.003) this.hp = phonesTarget;
+    if (this.hp > 0) this.phonePhase += dt * 7.5;
 
     for (const tw of [...this.tweens.values()]) {
       const k = tw.keys[tw.index];
@@ -655,6 +668,8 @@ export class BotEngine {
     x.scale(this.sx, this.sy);
 
     const body = this.bodyPath(rx, ry, R);
+    // The far side of the headphones is behind the head: drawn first, the head covers it.
+    if (this.hp > 0.01) this.drawHeadphonesBack(x, R, rx, ry);
     this.drawBody(x, body, R, rx, ry);
 
     const blushVal = Math.max(this.blush, this.tint * 0.5) * (1 - this.morph);
@@ -673,6 +688,7 @@ export class BotEngine {
 
     this.drawEyes(x, body, R, rx, ry);
     if (this.morph > 0.05) this.drawMouth(x, body, R);
+    if (this.hp > 0.01) this.drawHeadphonesFront(x, R, rx, ry);
 
     x.restore();
 
@@ -680,6 +696,153 @@ export class BotEngine {
       this.drawBadge(x, this.badge, R, cx, cy);
     }
     this.drawParticles(x, R, cx, cy);
+  }
+
+  /**
+   * Over-ear headphones worn in 3D. They sit on the head, so they turn with it: the
+   * head is a sphere (the same one the eyes sit on), the ear cups are at its two sides,
+   * and when Mochi turns, the near cup swings round to the front — bigger, showing its
+   * face — while the far one shrinks and slips behind the head. The band narrows with
+   * the turn. Looking up or down leaves them exactly where they are (pitch is ignored).
+   * They drop in from above when music starts, and the cups bob a little to a beat.
+   */
+  private phoneGeom(R: number, rx: number) {
+    const turn = Math.max(-0.7, Math.min(0.7, this.yaw));
+    const w = Math.max(R * 0.3, 6.5);
+    return {
+      c: Math.cos(turn),
+      s: Math.sin(turn),
+      bandW: Math.max(R * 0.13, 2.8),
+      w,
+      h: Math.max(R * 0.6, 12),
+      ring: Math.max(R * 0.035, 1.3),
+      inset: Math.max(R * 0.05, 1.3),
+      reach: rx * 0.99 + (w - R * 0.3) * 0.3,
+      bob: Math.sin(this.phonePhase) * Math.max(R * 0.022, 0.5) * this.hp,
+      accent: this.phoneAccent ?? ([99, 102, 241] as const),
+    };
+  }
+
+  /** Depth of a cup: positive is toward the viewer. The left one comes forward as Mochi turns right. */
+  private cupDepth(side: number, s: number): number {
+    return side < 0 ? s : -s;
+  }
+
+  private phoneBandPath(x: CanvasRenderingContext2D, g: ReturnType<BotEngine["phoneGeom"]>, ry: number, lift: number) {
+    const reach = g.reach * g.c;
+    x.beginPath();
+    x.moveTo(-reach, -ry * 0.02 - lift * 0.3);
+    x.bezierCurveTo(-reach * 1.04, -ry * (1.62 + lift), reach * 1.04, -ry * (1.62 + lift), reach, -ry * 0.02 - lift * 0.3);
+  }
+
+  private phoneEnter(x: CanvasRenderingContext2D, R: number, g: ReturnType<BotEngine["phoneGeom"]>) {
+    const ease = 1 - Math.pow(1 - this.hp, 3);
+    x.globalAlpha = Math.min(1, this.hp * 1.6);
+    x.translate(0, -(1 - ease) * R * 0.9 + g.bob * 0.4);
+  }
+
+  /** The part behind the head: the whole band, dim, and the cup that has turned away. */
+  private drawHeadphonesBack(x: CanvasRenderingContext2D, R: number, rx: number, ry: number) {
+    const g = this.phoneGeom(R, rx);
+    x.save();
+    this.phoneEnter(x, R, g);
+
+    const band = x.createLinearGradient(0, -ry * 1.3, 0, 0);
+    band.addColorStop(0, "#6b7384");
+    band.addColorStop(1, "#343944");
+    x.lineCap = "round";
+    x.strokeStyle = band;
+    x.lineWidth = g.bandW;
+    this.phoneBandPath(x, g, ry, 0);
+    x.stroke();
+
+    for (const side of [-1, 1]) {
+      const z = this.cupDepth(side, g.s);
+      if (z < -0.02) this.drawCup(x, R, g, ry, side, z);
+    }
+    x.restore();
+  }
+
+  /** The part in front: the band's near half, bright and glowing, and the cups facing us. */
+  private drawHeadphonesFront(x: CanvasRenderingContext2D, R: number, rx: number, ry: number) {
+    const g = this.phoneGeom(R, rx);
+    const [ar, ag, ab] = g.accent;
+    x.save();
+    this.phoneEnter(x, R, g);
+
+    x.save();
+    if (Math.abs(g.s) > 0.04) {
+      // Only the half of the band on the near side is in front of the head.
+      const nearLeft = g.s > 0;
+      x.beginPath();
+      x.rect(nearLeft ? -1e4 : 0, -1e4, 1e4, 2e4);
+      x.clip();
+    }
+    const band = x.createLinearGradient(0, -ry * 1.3, 0, 0);
+    band.addColorStop(0, "#d9dfec");
+    band.addColorStop(1, "#7d8595");
+    x.lineCap = "round";
+    x.shadowColor = `rgba(${ar},${ag},${ab},0.75)`;
+    x.shadowBlur = Math.max(R * 0.15, 3);
+    x.strokeStyle = band;
+    x.lineWidth = g.bandW;
+    this.phoneBandPath(x, g, ry, 0);
+    x.stroke();
+    x.shadowBlur = 0;
+    x.strokeStyle = "rgba(255,255,255,0.45)";
+    x.lineWidth = Math.max(R * 0.022, 0.9);
+    this.phoneBandPath(x, g, ry, -0.04);
+    x.stroke();
+    x.restore();
+
+    for (const side of [-1, 1]) {
+      const z = this.cupDepth(side, g.s);
+      if (z >= -0.02) this.drawCup(x, R, g, ry, side, z);
+    }
+    x.restore();
+  }
+
+  /** One ear cup, placed round the head, sized and shaded by how far toward us it is. */
+  private drawCup(
+    x: CanvasRenderingContext2D, R: number, g: ReturnType<BotEngine["phoneGeom"]>,
+    ry: number, side: number, z: number,
+  ) {
+    const [ar, ag, ab] = g.accent;
+    const turn = Math.abs(g.s);
+    const near = z >= 0;
+    // Seen edge-on at rest, a cup opens up toward us as the head turns, and narrows as it turns away.
+    const w = g.w * (near ? 1 + 0.9 * turn : 1 - 0.55 * turn);
+    const h = g.h * (1 + 0.18 * z);
+    const shade = near ? 1 : 0.62;
+    const tone = (v: number) => Math.round(v * shade);
+
+    x.save();
+    x.translate(side * g.reach * g.c, ry * 0.03 + g.bob);
+
+    const shell = x.createLinearGradient(-w / 2, 0, w / 2, 0);
+    shell.addColorStop(0, `rgb(${tone(0x5a)},${tone(0x61)},${tone(0x6e)})`);
+    shell.addColorStop(1, `rgb(${tone(0x2a)},${tone(0x2e)},${tone(0x35)})`);
+    x.fillStyle = shell;
+    roundRectPath(x, -w / 2, -h / 2, w, h, w * 0.46);
+    x.fill();
+
+    // The soft pad on the side that faces the head.
+    x.fillStyle = `rgba(255,255,255,${0.1 * shade})`;
+    const padW = w * 0.34;
+    roundRectPath(x, -side * (w / 2 - padW * 0.75) - padW / 2, -h * 0.34, padW, h * 0.68, padW * 0.5);
+    x.fill();
+
+    // The ring in the cover's colour, pulsing; brighter on the cup facing us.
+    const pulse = 0.55 + 0.45 * Math.sin(this.phonePhase + (side > 0 ? 0 : Math.PI * 0.35));
+    x.shadowColor = `rgba(${ar},${ag},${ab},${0.85 * pulse * shade})`;
+    x.shadowBlur = Math.max(R * 0.2, 3) * pulse * shade;
+    x.strokeStyle = `rgba(${ar},${ag},${ab},${(0.6 + 0.35 * pulse) * shade})`;
+    x.lineWidth = g.ring;
+    roundRectPath(
+      x, -w / 2 + g.inset, -h / 2 + g.inset * 1.3, Math.max(1, w - g.inset * 2), h - g.inset * 2.6, w * 0.36,
+    );
+    x.stroke();
+    x.restore();
   }
 
   private bodyPath(rx: number, ry: number, R: number): Path2D {

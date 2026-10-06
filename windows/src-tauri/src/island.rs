@@ -26,9 +26,27 @@ pub fn panel_size(s: &crate::settings::Settings) -> (f64, f64) {
 }
 
 fn current_panel_size(app: &AppHandle) -> (f64, f64) {
-    app.try_state::<crate::Shared>()
-        .map(|s| panel_size(&s.settings.lock().unwrap()))
-        .unwrap_or((PANEL_W, PANEL_H))
+    let Some(shared) = app.try_state::<crate::Shared>() else { return (PANEL_W, PANEL_H) };
+    let (w, h) = panel_size(&shared.settings.lock().unwrap());
+    if shared.gate.tall.load(Ordering::Relaxed) {
+        return (
+            w.max(crate::knowura::ISLAND_W + 80.0),
+            h.max(crate::knowura::ISLAND_H + 24.0),
+        );
+    }
+    (w, h)
+}
+
+/// Makes the window tall enough to hold the Knowura panel, or ordinary again.
+pub fn set_tall(app: &AppHandle, on: bool) {
+    let Some(shared) = app.try_state::<crate::Shared>() else { return };
+    if shared.gate.tall.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    let pref = shared.settings.lock().unwrap().screen.clone();
+    let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
+    apply_geometry(app, &pref, collapsed);
+    refresh_click_through(app, &shared.gate);
 }
 
 /// Puts the island's taskbar-related window style back (see
@@ -89,6 +107,8 @@ pub struct PollGate {
     active: Mutex<bool>,
     cv: Condvar,
     pub collapsed: AtomicBool,
+    /// The Knowura panel is open inside the notch: the window has to be tall enough for it.
+    pub tall: AtomicBool,
     pub rect: Mutex<IslandRect>,
     /// Mirrors the window flag so we only call into the OS when it changes.
     ignoring: AtomicBool,
@@ -100,6 +120,7 @@ impl PollGate {
             active: Mutex::new(false),
             cv: Condvar::new(),
             collapsed: AtomicBool::new(true),
+            tall: AtomicBool::new(false),
             rect: Mutex::new(IslandRect::default()),
             ignoring: AtomicBool::new(false),
         }
@@ -146,7 +167,7 @@ fn monitor_contains(m: &Monitor, x: f64, y: f64) -> bool {
 }
 
 /// The display the island lives on: the primary one, or the one under the cursor.
-fn target_monitor(app: &AppHandle, pref: &str) -> Option<Monitor> {
+pub(crate) fn target_monitor(app: &AppHandle, pref: &str) -> Option<Monitor> {
     let monitors = app.available_monitors().ok()?;
     if pref == "cursor" {
         if let Some((cx, cy)) = cursor_physical() {
@@ -234,6 +255,8 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
         // Remembered across wakes so a display change while hidden is noticed the
         // moment the island comes back.
         let mut last_screen: Option<(i32, i32, u32, u32, u64)> = None;
+        let mut last_privacy: Option<crate::privacy::Privacy> = None;
+        let mut last_unblock = std::time::Instant::now();
         // Without a cursor to read (Linux) the loop only watches the display
         // layout, and twice a second is plenty for that: waking at 60 Hz just to
         // find no cursor costs CPU for nothing.
@@ -252,6 +275,13 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 ticks = ticks.wrapping_add(1);
                 if ticks % screen_every == 0 {
                     enforce_taskbar_style(&app);
+                    // Camera / microphone in use: about twice a second, and only while the
+                    // island is on screen (this loop is parked when it is hidden).
+                    let privacy = crate::privacy::status();
+                    if last_privacy != Some(privacy) {
+                        last_privacy = Some(privacy);
+                        let _ = app.emit_to(WINDOW_LABEL, "privacy", privacy);
+                    }
                     let now = current_screen_key(&app);
                     if now.is_some() && now != last_screen {
                         let first = last_screen.is_none();
@@ -273,6 +303,37 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                     Ok(s) => (s.width as f64 / scale, s.height as f64 / scale),
                     Err(_) => current_panel_size(&app),
                 };
+                // A mouse press somewhere other than the island. Seen here, before the
+                // "has the pointer moved" check below, because a click needs no movement.
+                let down = left_button_down();
+                if down && !was_down {
+                    let r = *gate.rect.lock().unwrap();
+                    let inside = r.w > 0.0
+                        && x >= r.x - HIT_MARGIN
+                        && x <= r.x + r.w + HIT_MARGIN
+                        && y >= r.y - HIT_MARGIN
+                        && y <= r.y + r.h + HIT_MARGIN;
+                    if !inside {
+                        let _ = app.emit_to(WINDOW_LABEL, "outside-press", ());
+                    }
+                }
+                // A press may be the start of a drag, and WebView2 can register its own
+                // drop target again when the island changes size mid-drag (the "no drop"
+                // cursor, with the drag leaving without a drop). So while the button is
+                // held over the panel, keep making sure the drop target is ours.
+                if down
+                    && x >= 0.0
+                    && x <= size.0
+                    && y >= 0.0
+                    && y <= size.1
+                    && (!was_down || last_unblock.elapsed() >= Duration::from_millis(60))
+                {
+                    last_unblock = std::time::Instant::now();
+                    let handle = app.clone();
+                    let _ = app.run_on_main_thread(move || platform::unblock_webview_drops(&handle));
+                }
+                was_down = down;
+
                 if (x - last.0).abs() < 1.0 && (y - last.1).abs() < 1.0 {
                     continue;
                 }
@@ -295,15 +356,6 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // registered destinations whatever ignoresMouseEvents says. So while
                 // a button is held anywhere over the panel, the whole panel takes
                 // the mouse, which also makes the drop zone as forgiving as the Mac's.
-                // A press may be the start of a drag: make sure the drop target is
-                // ours before the file arrives.
-                let down = left_button_down();
-                if down && !was_down {
-                    let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || platform::unblock_webview_drops(&handle));
-                }
-                was_down = down;
-
                 let dragging = down
                     && x >= 0.0
                     && x <= size.0

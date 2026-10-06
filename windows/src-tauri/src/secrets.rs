@@ -9,6 +9,7 @@ const SERVICE: &str = "fr.louisraille.coucou";
 pub const KNOWN_KEYS: &[&str] = &[
     "anthropic-api-key",
     "ai-api-key",
+    "knowura-install-id",
     "n8n-url",
     "n8n-api-key",
     "vercel-token",

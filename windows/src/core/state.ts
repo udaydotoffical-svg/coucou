@@ -2,6 +2,7 @@
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
+import type { RGB } from "./color";
 
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
@@ -19,6 +20,8 @@ export interface AgentTask {
   miniEye?: EyeShape | null;
   pillBadge?: PillBadge | null;
   sessionCwd?: string | null;
+  /** The colour it has before any override from the settings. */
+  baseColor?: string;
 }
 
 export interface ApprovalInfo {
@@ -81,6 +84,47 @@ export interface IntegrationInfo {
   configured: boolean;
 }
 
+/** What is playing on this PC (src-tauri/src/music.rs). */
+export interface MusicInfo {
+  active: boolean;
+  playing: boolean;
+  title: string;
+  artist: string;
+  album: string;
+  app: string;
+  /** Album art as a data URL. */
+  art: string | null;
+  /** Seconds into the track when this arrived (see State.musicAt). */
+  position: number;
+  duration: number;
+  canPrev: boolean;
+  canNext: boolean;
+  canSeek: boolean;
+  canToggle: boolean;
+  shuffle: boolean;
+  repeat: "none" | "list" | "track";
+  canShuffle: boolean;
+  canRepeat: boolean;
+}
+
+/** The weather now and the days ahead (src-tauri/src/weather.rs), with what it was fetched for. */
+export interface WeatherInfo {
+  temp: number;
+  feels: number;
+  humidity: number;
+  wind: number;
+  code: number;
+  isDay: boolean;
+  high: number;
+  low: number;
+  unit: string;
+  windUnit: string;
+  days: { date: string; code: number; high: number; low: number }[];
+  place: string;
+  fahrenheit: boolean;
+  fetchedAt: number;
+}
+
 export interface Settings {
   soundEnabled: boolean;
   soundVolume: number;
@@ -102,6 +146,28 @@ export interface Settings {
   islandHeightExtra: number;
   /** Height of the closed (compact) island, logical px. */
   compactHeight: number;
+  /** "knowura" hosts the Knowura assistant in place of the chat; "mochi" keeps the built-in chat. */
+  assistantMode: "knowura" | "mochi";
+  /** Which avatar is the big, selected one at start; empty = VS Code. */
+  mainAvatar: string;
+  /** The two small squares of the overview: the avatars they hold (empty = automatic). */
+  squareSlots: string[];
+  /** While music plays, show the album art on the closed island. */
+  showMusicOnNotch: boolean;
+  /** Mochi wears headphones while music plays. */
+  mochiHeadphones: boolean;
+  /** Colour overrides for individual Mochis: avatar id → "#rrggbb". */
+  mochiColors: Record<string, string>;
+  /** Weather: the chosen city (empty = none yet), where it is, units, and whether to show it. */
+  weatherPlace: string;
+  weatherLat: number;
+  weatherLon: number;
+  weatherFahrenheit: boolean;
+  showWeather: boolean;
+  /** The small integration pills beside Mochi on the closed island. */
+  showMiniPills: boolean;
+  /** Close the open island, and the Knowura panel, when you click anywhere else. */
+  closeOnClickOutside: boolean;
   /** Open when the pointer rests on the island, close when it leaves. */
   openOnHover: boolean;
   /** When off, the island never closes or hides by itself. */
@@ -127,6 +193,19 @@ export const DEFAULT_SETTINGS: Settings = {
   islandWidth: 640,
   islandHeightExtra: 0,
   compactHeight: 32,
+  assistantMode: "knowura",
+  mainAvatar: "",
+  squareSlots: ["", ""],
+  showMusicOnNotch: true,
+  mochiHeadphones: true,
+  mochiColors: {},
+  weatherPlace: "",
+  weatherLat: 0,
+  weatherLon: 0,
+  weatherFahrenheit: false,
+  showWeather: true,
+  showMiniPills: true,
+  closeOnClickOutside: true,
   openOnHover: false,
   autoHide: true,
   alwaysOnTop: true,
@@ -151,6 +230,22 @@ class AppState {
 
   isPinned = false;
   paused = false;
+  /** The Knowura panel is open inside the notch. */
+  knowuraOpen = false;
+
+  music: MusicInfo | null = null;
+  /** The main colour of the current album cover, for the player and the closed island's art. */
+  musicColor: RGB | null = null;
+  /** Which cover `musicColor` belongs to. */
+  musicColorFor = "";
+
+  /** Camera / microphone in use (Windows' own usage records). */
+  privacy = { camera: false, mic: false };
+
+  weather: WeatherInfo | null = null;
+  weatherError: string | null = null;
+  /** performance.now() when `music` last arrived: playback is extrapolated from it. */
+  musicAt = 0;
 
   uploadProgress = 0;
   uploadDuration = 2.4;
@@ -249,6 +344,11 @@ class AppState {
       // both known integrations → declaration order
       return order.indexOf(a.id) - order.indexOf(b.id);
     });
+    // Colours picked in the settings win over the defaults.
+    for (const t of this.tasks) {
+      t.baseColor ??= t.color;
+      t.color = this.settings.mochiColors?.[t.id] || t.baseColor;
+    }
     if (!this.focusId) this.focusId = "integration_claude";
     this.notify();
   }
@@ -286,6 +386,39 @@ class AppState {
       this.settings.activeIntegrations = [...active, id];
     }
     this.loadIntegrationTasks();
+  }
+
+  /**
+   * The overview's two small squares: the avatars picked in the settings, and where a
+   * slot is automatic (or its pick is the selected one) the next unselected avatar.
+   */
+  squareTasks(): (AgentTask | null)[] {
+    const pool = this.tasks.filter((t) => t.id !== this.focusId);
+    const taken = new Set<string>();
+    const slots: (AgentTask | null)[] = [null, null];
+    this.settings.squareSlots.slice(0, 2).forEach((id, i) => {
+      const t = pool.find((x) => x.id === id && !taken.has(x.id));
+      if (t) {
+        slots[i] = t;
+        taken.add(t.id);
+      }
+    });
+    for (let i = 0; i < 2; i++) {
+      if (slots[i]) continue;
+      const t = pool.find((x) => !taken.has(x.id));
+      if (t) {
+        slots[i] = t;
+        taken.add(t.id);
+      }
+    }
+    return slots;
+  }
+
+  /** Selects the avatar chosen as the big one in the settings (empty = VS Code). */
+  applyMainAvatar() {
+    const id = this.settings.mainAvatar || "integration_claude";
+    if (this.tasks.some((t) => t.id === id)) this.focusId = id;
+    this.notify();
   }
 
   defaultView(): IslandViewName {

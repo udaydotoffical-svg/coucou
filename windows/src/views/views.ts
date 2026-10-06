@@ -2,8 +2,10 @@
 // colours and wording are copied from the Swift views so both platforms read
 // identically.
 
+import { DEFAULT_COLOR, palette } from "../core/color";
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
+import { buildWeather, degrees, refreshWeather, weatherIcon } from "./weather";
 import { Ticker } from "./ticker";
 import { State, type AgentTask } from "../core/state";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
@@ -26,6 +28,8 @@ export interface ViewActions {
   setAutoClose(seconds: number): void;
   openSettingsWindow(): void;
   blip(): void;
+  /** The music player's buttons: "toggle" | "next" | "prev" | "seek:<seconds>". */
+  musicControl(action: string): void;
 }
 
 export interface ViewHost {
@@ -81,6 +85,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Overview", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Ask", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const tabDrop = h("button", { class: "tab", title: "Drop", onclick: () => go("upload") }, svg(ICONS.plus, 13));
+  const tabWeather = h("button", { class: "tab", title: "Weather", onclick: () => go("weather") }, weatherIcon(3, true, 14));
+  const chip = h("button", { class: "wx-chip", title: "Weather", onclick: () => go("weather") });
+  let chipKey = "";
 
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
   const soundBtn = h("button", { title: "Mute", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOn, 14));
@@ -93,7 +100,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat, tabDrop),
+    h("div", { class: "tabs" }, tabHome, tabChat, tabDrop, tabWeather),
+    chip,
     h("div", { class: "header-actions" }, gearBtn, soundBtn),
   );
 
@@ -104,6 +112,25 @@ export function buildHeader(actions: ViewActions): ViewHost {
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
       tabDrop.classList.toggle("on", v === "upload");
+      tabWeather.classList.toggle("on", v === "weather");
+      tabWeather.style.display = State.settings.showWeather ? "" : "none";
+      // The temperature in the middle of the bar, once there is a city and a forecast.
+      const w = State.weather;
+      if (State.settings.showWeather && State.settings.weatherPlace) void refreshWeather();
+      chip.style.display = State.settings.showWeather && w ? "" : "none";
+      const ck = w ? `${w.code}|${w.isDay}|${Math.round(w.temp)}|${w.place}|${Math.round(w.high)}|${Math.round(w.low)}` : "";
+      if (ck !== chipKey) {
+        chipKey = ck;
+        clear(chip);
+        if (w) {
+          chip.append(
+            weatherIcon(w.code, w.isDay, 13),
+            h("span", { class: "wx-where", text: w.place }),
+            h("b", { text: degrees(w.temp) }),
+            h("span", { class: "wx-hl", text: `H ${degrees(w.high)} · L ${degrees(w.low)}` }),
+          );
+        }
+      }
       gearBtn.classList.toggle("on", v === "settings");
       clear(gearBtn);
       gearBtn.append(svg(v === "settings" ? ICONS.gearFill : ICONS.gear, 14));
@@ -127,13 +154,19 @@ function buildOverview(actions: ViewActions): ViewHost {
     svg(ICONS.arrowUpRight, 8),
   );
   const left = card(null, leftBody, jump);
+  // The right side. With music: two small squares for unselected avatars and the player
+  // under them. Without: the original grid of pills.
+  const squares = h("div", { class: "duo" });
+  const player = buildPlayer(actions);
+  const rightcol = h("div", { class: "rightcol" }, squares, player.el);
   const pills = h("div", { class: "pills" });
-  const right = card(null, pills);
+  const pillsCard = card(null, pills);
 
   const el = h("div", { class: "view overview" },
     h("div", { class: "left" }, left),
-    h("div", { class: "right" }, right),
+    h("div", { class: "right" }, rightcol, pillsCard),
   );
+  let pillKeyShown = "";
 
   let pillIds = "";
   let detailOpen = false;
@@ -214,13 +247,28 @@ function buildOverview(actions: ViewActions): ViewHost {
 
       jump.style.display = detailOpen ? "none" : "";
 
-      const others = State.otherTasks.slice(0, 4);
-      const pillKey = others.map((t) => `${t.id}:${t.pillBadge ?? ""}`).join("|");
-      if (pillKey !== pillIds) {
-        pillIds = pillKey;
-        clear(pills);
-        for (const t of others) pills.append(buildPill(t, actions));
-        pruneMiniBots();
+      const showPlayer = !!State.music?.active;
+      rightcol.style.display = showPlayer ? "" : "none";
+      pillsCard.style.display = showPlayer ? "none" : "";
+      if (showPlayer) {
+        const slots = State.squareTasks();
+        const squareKey = slots.map((t) => (t ? `${t.id}:${t.color}:${t.pillBadge ?? ""}` : "-")).join("|");
+        if (squareKey !== pillIds) {
+          pillIds = squareKey;
+          clear(squares);
+          for (const t of slots) squares.append(buildSquare(t, actions));
+          pruneMiniBots();
+        }
+        player.sync();
+      } else {
+        const others = State.otherTasks.slice(0, 4);
+        const pillKey = others.map((t) => `${t.id}:${t.color}:${t.pillBadge ?? ""}`).join("|");
+        if (pillKey !== pillKeyShown) {
+          pillKeyShown = pillKey;
+          clear(pills);
+          for (const t of others) pills.append(buildPill(t, actions));
+          pruneMiniBots();
+        }
       }
     },
   };
@@ -258,6 +306,268 @@ function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
     pill.append(badge);
   }
   return pill;
+}
+
+/** One of the overview's two small squares: an unselected avatar. Click to select it. */
+function buildSquare(task: AgentTask | null, actions: ViewActions): HTMLElement {
+  if (!task) return h("div", { class: "square empty" });
+  const label = task.id === "integration_claude" ? "VS Code" : task.name;
+  const canvas = createMiniBot(task, 26);
+  const sq = h(
+    "div",
+    { class: "square", onclick: () => actions.setFocus(task.id) },
+    canvas,
+    h("span", { class: "lbl", text: label }),
+  );
+  sq.style.borderColor = `${task.color}30`;
+  sq.addEventListener("mouseenter", () => {
+    sq.style.background = `${task.color}2e`;
+    sq.style.borderColor = `${task.color}8c`;
+    sq.style.boxShadow = `0 2px 10px ${task.color}59`;
+    (sq.querySelector(".lbl") as HTMLElement).style.color = lighten(task.color, 0.3);
+  });
+  sq.addEventListener("mouseleave", () => {
+    sq.style.background = "";
+    sq.style.borderColor = `${task.color}30`;
+    sq.style.boxShadow = "";
+    (sq.querySelector(".lbl") as HTMLElement).style.color = "";
+  });
+
+  if (task.pillBadge) {
+    const colors = { approval: "#F5A524", finished: "#22C55E", error: "#F4505E" } as const;
+    const icons = { approval: ICONS.bang, finished: ICONS.check, error: ICONS.xmark } as const;
+    const inner = h("i", { style: `background:${colors[task.pillBadge]}` }, svg(icons[task.pillBadge], 6, { stroke: task.pillBadge === "finished" ? 3 : 0 }));
+    const badge = h("div", { class: "pill-badge" }, inner);
+    badge.style.boxShadow = `0 0 4px ${colors[task.pillBadge]}99`;
+    sq.append(badge);
+  }
+  return sq;
+}
+
+// ── Music player ──────────────────────────────────────────────────────────────
+
+const clock = (secs: number) => {
+  const s = Math.max(0, Math.floor(secs));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+
+/**
+ * The player under the two squares: album art with a blurred glow behind it, the
+ * track (scrolling when it is long), a bar to seek on, and previous / play / next.
+ * What is playing comes from Windows' media session, so it works for Spotify, a
+ * browser tab, Apple Music, VLC — whatever is playing.
+ */
+function buildPlayer(actions: ViewActions): { el: HTMLElement; sync(): void } {
+  const bg = h("div", { class: "p-bg" });
+  const art = h("div", { class: "p-art noart" }, svg(ICONS.note, 20));
+  const title = h("span", { class: "p-title-text" });
+  const titleBox = h("div", { class: "p-title" }, title);
+  // Moving bars above the title, in rainbow colours. They bounce with the music playing.
+  const viz = h("div", { class: "p-viz" });
+  for (let i = 0; i < 20; i++) {
+    const bar = h("i");
+    bar.style.setProperty("--i", String(i));
+    bar.style.setProperty("--d", `${(0.55 + ((i * 37) % 11) / 14).toFixed(2)}s`);
+    bar.style.setProperty("--o", `-${(i * 0.13).toFixed(2)}s`);
+    bar.style.setProperty("--lo", (0.15 + ((i * 53) % 7) / 30).toFixed(2));
+    viz.append(bar);
+  }
+  const artist = h("div", { class: "p-artist" });
+  const elapsed = h("span", { class: "p-time" });
+  const total = h("span", { class: "p-time r" });
+  const fill = h("div", { class: "p-fill" });
+  const bar = h("div", { class: "p-bar", title: "Seek" }, fill);
+  const prev = h("button", { class: "p-btn", title: "Previous" }, svg(ICONS.skipPrev, 13)) as HTMLButtonElement;
+  const play = h("button", { class: "p-btn p-play", title: "Play / pause" }, svg(ICONS.play, 15)) as HTMLButtonElement;
+  const next = h("button", { class: "p-btn", title: "Next" }, svg(ICONS.skipNext, 13)) as HTMLButtonElement;
+  const shuffle = h("button", { class: "p-mini", title: "Shuffle" }, svg(ICONS.shuffle, 12, { stroke: 2 })) as HTMLButtonElement;
+  const repeat = h("button", { class: "p-mini", title: "Repeat" }, svg(ICONS.repeat, 12, { stroke: 2 })) as HTMLButtonElement;
+
+  const el = h(
+    "div",
+    { class: "player idle" },
+    bg,
+    art,
+    h("div", { class: "p-main" },
+      viz,
+      h("div", { class: "p-head" }, titleBox),
+      artist,
+      h("div", { class: "p-seek" }, elapsed, bar, total),
+    ),
+    h("div", { class: "p-ctl" },
+      h("div", { class: "p-row" }, prev, play, next),
+      h("div", { class: "p-skips" }, shuffle, repeat),
+    ),
+  );
+
+  // While the bar is being dragged it shows the drag position, not the song's.
+  let scrub: number | null = null;
+  const livePosition = (): number => {
+    const m = State.music;
+    if (!m) return 0;
+    const p = m.position + (m.playing ? (performance.now() - State.musicAt) / 1000 : 0);
+    return m.duration > 0 ? Math.min(p, m.duration) : p;
+  };
+  const paint = () => {
+    const m = State.music;
+    if (!m?.active) return;
+    const p = scrub ?? livePosition();
+    fill.style.width = m.duration > 0 ? `${(p / m.duration) * 100}%` : "0%";
+    elapsed.textContent = clock(p);
+    total.textContent = m.duration > 0 ? clock(m.duration) : "";
+  };
+
+  // The bar moves on a timer that only runs while the player is on screen and playing.
+  let timer: number | null = null;
+  const syncTimer = () => {
+    const want = State.mode === "expanded" && State.view === "overview" && !!State.music?.playing;
+    if (want && timer == null) timer = window.setInterval(paint, 500);
+    else if (!want && timer != null) {
+      window.clearInterval(timer);
+      timer = null;
+    }
+  };
+
+  shuffle.addEventListener("click", () => {
+    const m = State.music;
+    if (m) {
+      m.shuffle = !m.shuffle;
+      State.notify();
+    }
+    actions.musicControl("shuffle");
+  });
+  repeat.addEventListener("click", () => {
+    const m = State.music;
+    if (m) {
+      m.repeat = m.repeat === "none" ? "list" : m.repeat === "list" ? "track" : "none";
+      State.notify();
+    }
+    actions.musicControl("repeat");
+  });
+
+  prev.addEventListener("click", () => actions.musicControl("prev"));
+  next.addEventListener("click", () => actions.musicControl("next"));
+  play.addEventListener("click", () => {
+    const m = State.music;
+    if (m) {
+      // Instant feedback; Windows confirms a moment later.
+      m.position = livePosition();
+      m.playing = !m.playing;
+      State.musicAt = performance.now();
+      State.notify();
+    }
+    actions.musicControl("toggle");
+  });
+  // Drag the bar to scrub; the song jumps when you let go. A plain click seeks too.
+  const secondsAt = (e: PointerEvent): number => {
+    const m = State.music;
+    const r = bar.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (m?.duration ?? 0);
+  };
+  bar.addEventListener("pointerdown", (e) => {
+    const m = State.music;
+    if (!m?.canSeek || m.duration <= 0) return;
+    bar.setPointerCapture(e.pointerId);
+    bar.classList.add("scrubbing");
+    scrub = secondsAt(e);
+    paint();
+    e.preventDefault();
+  });
+  bar.addEventListener("pointermove", (e) => {
+    if (scrub == null) return;
+    scrub = secondsAt(e);
+    paint();
+  });
+  const release = (commit: boolean) => {
+    if (scrub == null) return;
+    const secs = scrub;
+    scrub = null;
+    bar.classList.remove("scrubbing");
+    const m = State.music;
+    if (commit && m) {
+      m.position = secs;
+      State.musicAt = performance.now();
+      actions.musicControl(`seek:${secs.toFixed(2)}`);
+    }
+    paint();
+  };
+  bar.addEventListener("pointerup", () => release(true));
+  bar.addEventListener("pointercancel", () => release(false));
+
+  // A title too long for its space slides sideways so it can be read in full. The space
+  // changes while the island opens, so it is measured again whenever it changes size.
+  const measureTitle = () => {
+    const over = title.scrollWidth - titleBox.clientWidth;
+    titleBox.classList.toggle("scroll", over > 4);
+    if (over > 4) titleBox.style.setProperty("--over", `${over + 8}px`);
+  };
+  new ResizeObserver(measureTitle).observe(titleBox);
+
+  let trackKey = "";
+  let wasPlaying: boolean | null = null;
+  let repeatShown = "none";
+  let colorShown = "";
+  return {
+    el,
+    sync() {
+      const m = State.music;
+      const idle = !m || !m.active;
+      el.classList.toggle("idle", idle);
+      // The bars only move while the island is open: a closed one costs nothing.
+      el.classList.toggle("playing", !!m?.playing && State.mode === "expanded");
+      const pal = palette(State.musicColor ?? DEFAULT_COLOR);
+      if (pal.p !== colorShown) {
+        colorShown = pal.p;
+        el.style.setProperty("--p", pal.p);
+        el.style.setProperty("--p-light", pal.light);
+        el.style.setProperty("--p-ink", pal.ink);
+      }
+      if (idle) {
+        if (trackKey !== "idle") {
+          trackKey = "idle";
+          title.textContent = "Nothing playing";
+          artist.textContent = "Play something in Spotify, YouTube Music…";
+          art.style.backgroundImage = "";
+          art.classList.add("noart");
+          bg.style.backgroundImage = "";
+          titleBox.classList.remove("scroll");
+        }
+        syncTimer();
+        return;
+      }
+      const key = `${m.app}|${m.title}|${m.artist}|${m.art?.length ?? 0}`;
+      if (key !== trackKey) {
+        trackKey = key;
+        title.textContent = m.title || "Unknown title";
+        artist.textContent = m.artist || m.album || "";
+        const url = m.art ? `url("${m.art}")` : "";
+        art.style.backgroundImage = url;
+        bg.style.backgroundImage = url;
+        art.classList.toggle("noart", !m.art);
+        measureTitle();
+      }
+      if (wasPlaying !== m.playing) {
+        wasPlaying = m.playing;
+        clear(play);
+        play.append(svg(m.playing ? ICONS.pause : ICONS.play, 15));
+      }
+      prev.disabled = !m.canPrev;
+      next.disabled = !m.canNext;
+      play.disabled = !m.canToggle;
+      shuffle.disabled = !m.canShuffle;
+      repeat.disabled = !m.canRepeat;
+      shuffle.classList.toggle("on", m.shuffle);
+      repeat.classList.toggle("on", m.repeat !== "none");
+      if (repeatShown !== m.repeat) {
+        repeatShown = m.repeat;
+        clear(repeat);
+        repeat.append(svg(m.repeat === "track" ? ICONS.repeatOne : ICONS.repeat, 12, { stroke: 2 }));
+      }
+      bar.classList.toggle("seekable", m.canSeek && m.duration > 0);
+      paint();
+      syncTimer();
+    },
+  };
 }
 
 function lighten(hex: string, amount: number): string {
@@ -489,6 +799,7 @@ export function buildViews(
 ): Map<IslandViewName, ViewHost> {
   const map = new Map<IslandViewName, ViewHost>();
   map.set("overview", buildOverview(actions));
+  map.set("weather", buildWeather(actions));
   map.set("empty", buildEmpty(actions));
   map.set("approval", buildApproval(actions));
   map.set("question", buildQuestion());

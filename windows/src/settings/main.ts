@@ -4,7 +4,7 @@
 
 import "./settings.css";
 import { Bridge, onEvent, type HookStatus } from "../core/bridge";
-import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import { DEFAULT_SETTINGS, INTEGRATION_AGENTS, type Settings } from "../core/state";
 import { COMPACT_HEIGHT_MAX, COMPACT_HEIGHT_MIN, ISLAND_HEIGHT_EXTRA_MAX, ISLAND_HEIGHT_EXTRA_MIN, ISLAND_WIDTH_MAX, ISLAND_WIDTH_MIN } from "../core/layout";
 import { h, clear } from "../views/dom";
 
@@ -386,6 +386,206 @@ function aiSection(): HTMLElement {
   );
 }
 
+// ── Assistant (Mochi / Knowura) section ───────────────────────────────────────
+
+function assistantSection(hotkey: string | null, aiSection: HTMLElement): HTMLElement {
+  const mode = h("select", {}) as HTMLSelectElement;
+  mode.append(
+    h("option", { value: "knowura", text: "Knowura (hosted assistant)" }),
+    h("option", { value: "mochi", text: "Mochi (built-in chat)" }),
+  );
+  mode.value = settings.assistantMode;
+
+  const keyText = hotkey ?? "Alt+Space";
+  const knowuraOnly = h("div", { style: "display:flex;flex-direction:column;gap:12px" },
+    h("div", {
+      class: "hint",
+      text: `The chat tab opens the Knowura assistant — chat, live voice, attachments and quizzes, signed in once and kept. ` +
+        `${keyText} opens the text box from anywhere (and closes it again). There is no voice shortcut: use the mic button in the panel, or Start voice in the tray menu.`,
+    }),
+    h("div", { class: "row" },
+      h("button", { class: "primary", text: "Open text box", onclick: () => void Bridge.knowuraOpen("text") }),
+      h("button", { text: "Start voice", onclick: () => void Bridge.knowuraOpen("voice") }),
+      h("button", { text: "Sign in with the browser", onclick: () => void Bridge.knowuraSignInBrowser() }),
+    ),
+    h("div", { class: "hint", text: "Signing in works two ways: inside the app (Google opens in its own window), or in your browser with the button above — the app then picks your account up by itself once Knowura supports it." }),
+  );
+  const mochiOnly = h("div", { class: "hint", text: "Mochi's own chat, using the AI provider below." });
+
+  // The provider settings only matter to Mochi's own chat.
+  const show = () => {
+    const knowura = mode.value === "knowura";
+    knowuraOnly.style.display = knowura ? "" : "none";
+    mochiOnly.style.display = knowura ? "none" : "";
+    aiSection.style.display = knowura ? "none" : "";
+  };
+  mode.addEventListener("change", () => {
+    settings.assistantMode = mode.value as Settings["assistantMode"];
+    show();
+    void save();
+  });
+  show();
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Assistant" })),
+    h("div", { class: "row" }, h("label", { text: "Chat mode" }), mode),
+    knowuraOnly,
+    mochiOnly,
+  );
+}
+
+// ── Overview layout section ───────────────────────────────────────────────────
+
+function layoutSection(): HTMLElement {
+  // The avatars that can fill a spot: VS Code and the integrations that are switched on.
+  const ids = ["integration_claude", ...settings.activeIntegrations];
+  const candidates = INTEGRATION_AGENTS.filter((t) => ids.includes(t.id));
+  const picker = (value: string, autoLabel: string, onPick: (id: string) => void) => {
+    const sel = h("select", {}) as HTMLSelectElement;
+    sel.append(h("option", { value: "", text: autoLabel }));
+    for (const t of candidates) sel.append(h("option", { value: t.id, text: t.id === "integration_claude" ? "VS Code" : t.name }));
+    sel.value = candidates.some((t) => t.id === value) ? value : "";
+    sel.addEventListener("change", () => onPick(sel.value));
+    return sel;
+  };
+
+  const slots = [settings.squareSlots[0] ?? "", settings.squareSlots[1] ?? ""];
+  const setSlot = (i: number, id: string) => {
+    slots[i] = id;
+    settings.squareSlots = [...slots];
+    void save();
+  };
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Overview layout" })),
+    h("div", { class: "hint", text: "The big avatar on the left, the two small squares for unselected avatars on the right, and the music player under them. Clicking a square swaps it with the big one." }),
+    h("div", { class: "row" },
+      h("label", { text: "Main avatar" }),
+      picker(settings.mainAvatar, "VS Code (default)", (id) => { settings.mainAvatar = id; void save(); }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Square 1" }),
+      picker(slots[0], "Automatic", (id) => setSlot(0, id)),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Square 2" }),
+      picker(slots[1], "Automatic", (id) => setSlot(1, id)),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Album art on closed island" }),
+      toggle(settings.showMusicOnNotch, (v) => { settings.showMusicOnNotch = v; void save(); }),
+      h("span", { class: "hint", text: "While music plays, the art replaces the small pills on the closed island" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Headphones on Mochi" }),
+      toggle(settings.mochiHeadphones, (v) => { settings.mochiHeadphones = v; void save(); }),
+      h("span", { class: "hint", text: "Mochi puts headphones on while music plays" }),
+    ),
+  );
+}
+
+// ── Mochi colours section ─────────────────────────────────────────────────────
+
+function colorsSection(): HTMLElement {
+  const rows = INTEGRATION_AGENTS.map((t) => {
+    const name = t.id === "integration_claude" ? "VS Code" : t.name;
+    const input = h("input", { type: "color", value: settings.mochiColors[t.id] ?? t.color }) as HTMLInputElement;
+    input.addEventListener("change", () => {
+      settings.mochiColors = { ...settings.mochiColors, [t.id]: input.value };
+      void save();
+    });
+    const reset = h("button", {
+      text: "Reset",
+      onclick: () => {
+        const { [t.id]: _gone, ...rest } = settings.mochiColors;
+        settings.mochiColors = rest;
+        input.value = t.color;
+        void save();
+      },
+    });
+    return h("div", { class: "row" }, h("label", { text: name }), input, reset);
+  });
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Mochi colours" })),
+    h("div", { class: "hint", text: "Pick a colour for each Mochi: its body in the pills, the squares and the closed island." }),
+    ...rows,
+  );
+}
+
+// ── Weather section ───────────────────────────────────────────────────────────
+
+function weatherSection(): HTMLElement {
+  const status = h("div", { class: "hint", text: settings.weatherPlace ? `Showing the weather for ${settings.weatherPlace}.` : "No city chosen yet." });
+  const input = h("input", {
+    type: "text",
+    placeholder: "Your city, for example Paris",
+    style: "flex:1 1 auto;min-width:0",
+    autocomplete: "off",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+  const find = h("button", { class: "primary", text: "Find" });
+  const results = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
+
+  const choose = (p: { name: string; detail: string; lat: number; lon: number }) => {
+    settings.weatherPlace = p.name;
+    settings.weatherLat = p.lat;
+    settings.weatherLon = p.lon;
+    void save();
+    status.textContent = `Showing the weather for ${p.name}${p.detail ? ` (${p.detail})` : ""}.`;
+    clear(results);
+    input.value = "";
+  };
+
+  async function search() {
+    const query = input.value.trim();
+    if (!query) return;
+    clear(results);
+    results.append(h("div", { class: "hint", text: "Searching…" }));
+    try {
+      const found = await Bridge.weatherSearch(query);
+      clear(results);
+      if (!found.length) {
+        results.append(h("div", { class: "hint", text: "No city by that name." }));
+        return;
+      }
+      for (const p of found) {
+        results.append(h("button", { text: p.detail ? `${p.name} — ${p.detail}` : p.name, onclick: () => choose(p) }));
+      }
+    } catch (err) {
+      clear(results);
+      results.append(h("div", { class: "notice err", text: String(err).replace(/^Error:\s*/, "") }));
+    }
+  }
+  find.addEventListener("click", () => void search());
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") void search(); });
+
+  const units = h("select", {}) as HTMLSelectElement;
+  units.append(h("option", { value: "c", text: "Celsius (°C, km/h)" }), h("option", { value: "f", text: "Fahrenheit (°F, mph)" }));
+  units.value = settings.weatherFahrenheit ? "f" : "c";
+  units.addEventListener("change", () => { settings.weatherFahrenheit = units.value === "f"; void save(); });
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Weather" })),
+    h("div", { class: "hint", text: "Shows the temperature in the island's bar and a weather tab. It uses Open-Meteo, which needs no account; only the city you pick here is looked up." }),
+    status,
+    h("div", { class: "row" }, h("label", { text: "City" }), input, find),
+    results,
+    h("div", { class: "row" }, h("label", { text: "Units" }), units),
+    h("div", { class: "row" },
+      h("label", { text: "Show weather" }),
+      toggle(settings.showWeather, (v) => { settings.showWeather = v; void save(); }),
+    ),
+  );
+}
+
 // ── Integrations section ──────────────────────────────────────────────────────
 
 interface IntegrationDef {
@@ -571,6 +771,16 @@ function generalSection(): HTMLElement {
       h("span", { class: "hint", text: "Opens when the pointer rests on the island, closes when it leaves" }),
     ),
     h("div", { class: "row" },
+      h("label", { text: "Close on click outside" }),
+      toggle(settings.closeOnClickOutside, (v) => { settings.closeOnClickOutside = v; void save(); }),
+      h("span", { class: "hint", text: "Clicking elsewhere closes the open island and the Knowura panel (the file-drop view stays open until you switch away)" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Pills on closed island" }),
+      toggle(settings.showMiniPills, (v) => { settings.showMiniPills = v; void save(); }),
+      h("span", { class: "hint", text: "The small integration pills beside Mochi; off leaves just the main blob" }),
+    ),
+    h("div", { class: "row" },
       h("label", { text: "Auto-hide" }),
       autoHide,
       h("span", { class: "hint", text: "Off keeps the island open and visible until you close it" }),
@@ -631,11 +841,16 @@ async function main() {
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;
 
+  const ai = aiSection();
   clear(root);
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
-    aiSection(),
+    assistantSection(boot?.knowuraHotkey ?? null, ai),
+    ai,
+    layoutSection(),
+    weatherSection(),
+    colorsSection(),
     integrationsSection(present),
     generalSection(),
     h("div", {

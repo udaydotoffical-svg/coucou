@@ -21,7 +21,9 @@ export type IslandViewName =
   | "result"
   | "note"
   | "settings"
-  | "greeting";
+  | "greeting"
+  | "knowura"
+  | "weather";
 
 export type BotStateName =
   | "idle"
@@ -88,6 +90,18 @@ export const NOTCH_H = 32;
 export const COMPACT_W = 288; // NOTCH_W + 104
 export const EXPANDED_W = 640;
 
+/**
+ * Knowura inside the notch: the island grows to this size and the page sits in it
+ * with a thick black bezel all round (the same numbers live in src-tauri/src/knowura.rs).
+ */
+export const KNOWURA_BEZEL = 14;
+export const KNOWURA_PAGE_W = 440;
+export const KNOWURA_PAGE_H = 580;
+export const KNOWURA_ISLAND_W = KNOWURA_PAGE_W + 2 * KNOWURA_BEZEL;
+export const KNOWURA_ISLAND_H = KNOWURA_PAGE_H + 2 * KNOWURA_BEZEL;
+/** Outer corner radius; the page's own is this minus the bezel, so the curves are concentric. */
+export const KNOWURA_RADIUS = 34;
+
 export const ROUNDED_CORNER = 14; // hidden / compact
 export const EXPANDED_CORNER = 22;
 
@@ -115,7 +129,12 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
   settings: { height: 160, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   greeting: { height: 150, botX: 320, botY: 90, botDiameter: 0, agentMode: "none" },
+  knowura: { height: KNOWURA_ISLAND_H, botX: 0, botY: 0, botDiameter: 0, agentMode: "none" },
+  weather: { height: 160, botX: 56, botY: null, botDiameter: 48, agentMode: "column" },
 };
+
+/** The overview is taller while the music player is in it. */
+export const OVERVIEW_WITH_PLAYER = 184;
 
 // The upload views above are only the fallback geometry. Once a file is actually
 // dropped the whole sequence — Mochi included — is drawn by src/upload, which
@@ -131,6 +150,7 @@ export function islandSize(
   view: IslandViewName,
   chatCount = 0,
   sizing: IslandSizing = { islandWidth: EXPANDED_W, islandHeightExtra: 0, compactHeight: NOTCH_H },
+  playerShown = false,
 ): { w: number; h: number } {
   switch (mode) {
     case "hidden":
@@ -140,7 +160,11 @@ export function islandSize(
     case "compact":
       return { w: COMPACT_W, h: sizing.compactHeight };
     case "expanded": {
-      const base = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
+      if (view === "knowura") return { w: KNOWURA_ISLAND_W, h: KNOWURA_ISLAND_H };
+      const base =
+        view === "prompt" ? chatPromptHeight(chatCount)
+        : view === "overview" && playerShown ? OVERVIEW_WITH_PLAYER
+        : VIEW_LAYOUTS[view].height;
       if (FIXED_SIZE_VIEWS.has(view)) return { w: EXPANDED_W, h: base };
       const floor = MIN_VIEW_HEIGHT[view] ?? DEFAULT_MIN_VIEW_HEIGHT;
       return { w: sizing.islandWidth, h: Math.max(floor, base + sizing.islandHeightExtra) };

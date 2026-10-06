@@ -2,6 +2,7 @@
 // No secret ever lands here — API keys live in the OS keychain (see secrets.rs).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +37,43 @@ pub struct Settings {
     /// Height of the closed (compact) island, logical px.
     #[serde(default = "default_compact_height")]
     pub compact_height: f64,
+    /// "knowura" hosts the Knowura assistant in place of the chat; "mochi" keeps
+    /// the built-in chat.
+    #[serde(default = "default_assistant_mode")]
+    pub assistant_mode: String,
+    /// Which avatar is selected (the big one) when Coucou starts; empty = VS Code.
+    #[serde(default)]
+    pub main_avatar: String,
+    /// The two small squares of the overview: which unselected avatars they hold.
+    /// An empty entry picks one automatically.
+    #[serde(default = "two_empty")]
+    pub square_slots: Vec<String>,
+    /// While music plays, show the album art on the closed island.
+    #[serde(default = "yes")]
+    pub show_music_on_notch: bool,
+    /// Mochi wears headphones while music plays.
+    #[serde(default = "yes")]
+    pub mochi_headphones: bool,
+    /// Colour overrides for individual Mochis: avatar id → "#rrggbb".
+    #[serde(default)]
+    pub mochi_colors: HashMap<String, String>,
+    /// Weather: the city chosen in the settings (empty = none yet) and where it is.
+    #[serde(default)]
+    pub weather_place: String,
+    #[serde(default)]
+    pub weather_lat: f64,
+    #[serde(default)]
+    pub weather_lon: f64,
+    #[serde(default)]
+    pub weather_fahrenheit: bool,
+    #[serde(default = "yes")]
+    pub show_weather: bool,
+    /// The small integration pills beside Mochi on the closed island.
+    #[serde(default = "yes")]
+    pub show_mini_pills: bool,
+    /// Close the open island, and the Knowura panel, when you click anywhere else.
+    #[serde(default = "yes")]
+    pub close_on_click_outside: bool,
     /// Open when the pointer rests on the island, close when it leaves.
     #[serde(default)]
     pub open_on_hover: bool,
@@ -63,6 +101,14 @@ fn default_provider() -> String {
     "anthropic".into()
 }
 
+fn two_empty() -> Vec<String> {
+    vec![String::new(), String::new()]
+}
+
+fn default_assistant_mode() -> String {
+    "knowura".into()
+}
+
 fn default_compact_height() -> f64 {
     32.0
 }
@@ -82,6 +128,25 @@ impl Settings {
         self.island_height_extra =
             self.island_height_extra.clamp(ISLAND_HEIGHT_EXTRA_MIN, ISLAND_HEIGHT_EXTRA_MAX);
         self.compact_height = self.compact_height.clamp(COMPACT_HEIGHT_MIN, COMPACT_HEIGHT_MAX);
+        self.mochi_colors.retain(|id, c| {
+            id.len() <= 48
+                && c.len() == 7
+                && c.starts_with('#')
+                && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+        });
+        if self.mochi_colors.len() > 24 {
+            self.mochi_colors.clear();
+        }
+        self.weather_place.truncate(80);
+        self.weather_lat = self.weather_lat.clamp(-90.0, 90.0);
+        self.weather_lon = self.weather_lon.clamp(-180.0, 180.0);
+        self.square_slots.resize(2, String::new());
+        for slot in self.square_slots.iter_mut().chain(std::iter::once(&mut self.main_avatar)) {
+            slot.truncate(48);
+        }
+        if self.assistant_mode != "mochi" {
+            self.assistant_mode = default_assistant_mode();
+        }
         if self.ai_provider != "openai" {
             self.ai_provider = default_provider();
         }
@@ -112,6 +177,19 @@ impl Default for Settings {
             island_width: default_island_width(),
             island_height_extra: 0.0,
             compact_height: default_compact_height(),
+            assistant_mode: default_assistant_mode(),
+            main_avatar: String::new(),
+            square_slots: two_empty(),
+            show_music_on_notch: true,
+            mochi_headphones: true,
+            mochi_colors: HashMap::new(),
+            weather_place: String::new(),
+            weather_lat: 0.0,
+            weather_lon: 0.0,
+            weather_fahrenheit: false,
+            show_weather: true,
+            show_mini_pills: true,
+            close_on_click_outside: true,
             open_on_hover: false,
             auto_hide: true,
             always_on_top: true,

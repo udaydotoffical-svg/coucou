@@ -20,10 +20,14 @@ export class IslandStateMachine {
   pinned = false;
   /** Off: the island never closes (open → compact) or hides (compact → hidden) on its own. */
   autoHide = true;
+  /** While Knowura is open the notch ignores the pointer completely: no peeking, no opening, no auto-close. */
+  locked = false;
   /** On: resting the pointer on the island opens it, and leaving closes it again. */
   openOnHover = false;
   /** Seconds the pointer may be away before a hover-opened island closes. */
   hoverCloseDelay = 0.35;
+  /** True while something should keep the closed island on screen (music playing). */
+  holdVisible: () => boolean = () => false;
   /** Lets the owner keep the island open while the pointer is away (typing in the chat…). */
   hoverCloseGuard: () => boolean = () => true;
 
@@ -39,6 +43,7 @@ export class IslandStateMachine {
   }
 
   mouseEntered() {
+    if (this.locked) return;
     switch (this.state) {
       case "hidden":
         this.cancelTimers();
@@ -62,6 +67,7 @@ export class IslandStateMachine {
 
   /** `real` is false when the owner reports a leave the pointer did not make (an alert opened it elsewhere). */
   mouseLeft(real = true) {
+    if (this.locked) return;
     switch (this.state) {
       case "hidden":
         break;
@@ -80,7 +86,7 @@ export class IslandStateMachine {
   }
 
   click() {
-    if (this.state !== "petit") return;
+    if (this.locked || this.state !== "petit") return;
     this.cancelTimers();
     this.transition("home");
   }
@@ -128,7 +134,7 @@ export class IslandStateMachine {
 
   private schedulePetitHide() {
     this.clear("petitHide");
-    if (!this.autoHide) return;
+    if (!this.autoHide || this.locked || this.holdVisible()) return;
     this.petitHide = window.setTimeout(() => {
       this.petitHide = null;
       if (this.state === "petit") this.transition("hidden");
@@ -145,7 +151,7 @@ export class IslandStateMachine {
 
   private scheduleHomeCollapse() {
     this.clear("homeCollapse");
-    if (this.pinned || !this.autoHide) return;
+    if (this.pinned || !this.autoHide || this.locked) return;
     this.homeCollapse = window.setTimeout(() => {
       this.homeCollapse = null;
       if (this.state === "home") this.transition("petit");

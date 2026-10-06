@@ -1,27 +1,54 @@
-// Notification-area icon: Open, Settings, Pause, Quit.
+// Notification-area icon: Open, Settings, Pause, Quit — plus the Knowura entries
+// (text box, voice, full app) while Knowura mode is on.
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::island::WINDOW_LABEL;
+use crate::knowura::{self, Mode};
 
-pub fn build(app: &AppHandle) -> tauri::Result<()> {
+const TRAY_ID: &str = "coucou";
+
+fn menu(app: &AppHandle, knowura_mode: bool, autostart: bool) -> tauri::Result<Menu<tauri::Wry>> {
     let open = MenuItem::with_id(app, "open", "Open Coucou", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", "Pause", true, None::<&str>)?;
+    let start = CheckMenuItem::with_id(app, "autostart", "Start with Windows", true, autostart, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
 
-    let menu = Menu::with_items(app, &[&open, &sep1, &settings, &pause, &sep2, &quit])?;
+    let menu = Menu::new(app)?;
+    if knowura_mode {
+        menu.append(&MenuItem::with_id(app, "kw_text", "Open Knowura (text)", true, None::<&str>)?)?;
+        menu.append(&MenuItem::with_id(app, "kw_voice", "Start voice", true, None::<&str>)?)?;
+        menu.append(&MenuItem::with_id(app, "kw_app", "Open the full Knowura app", true, None::<&str>)?)?;
+        menu.append(&MenuItem::with_id(app, "kw_signin", "Sign in with the browser…", true, None::<&str>)?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    menu.append(&open)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&settings)?;
+    menu.append(&pause)?;
+    menu.append(&start)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&quit)?;
+    Ok(menu)
+}
 
-    let mut builder = TrayIconBuilder::with_id("coucou")
+pub fn build(app: &AppHandle, knowura_mode: bool, autostart: bool) -> tauri::Result<()> {
+    let menu = menu(app, knowura_mode, autostart)?;
+
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("Coucou")
         .menu(&menu)
         .on_menu_event(|app: &AppHandle, event| match event.id.as_ref() {
             "quit" => app.exit(0),
             "settings" => crate::show_settings_window(app),
+            "autostart" => crate::toggle_autostart(app),
+            "kw_text" => knowura::open(app, Mode::Text),
+            "kw_voice" => knowura::open(app, Mode::Voice),
+            "kw_app" => knowura::open_full(app, "/"),
+            "kw_signin" => knowura::sign_in_browser(),
             id => {
                 let _ = app.emit_to(WINDOW_LABEL, "tray", id.to_string());
             }
@@ -33,4 +60,18 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 
     builder.build(app)?;
     Ok(())
+}
+
+/// The menu depends on the settings (Knowura mode, start with Windows).
+pub fn refresh(app: &AppHandle) {
+    let (knowura_mode, autostart) = app
+        .try_state::<crate::Shared>()
+        .map(|s| {
+            let s = s.settings.lock().unwrap();
+            (s.assistant_mode == "knowura", s.autostart)
+        })
+        .unwrap_or((false, false));
+    if let (Some(tray), Ok(menu)) = (app.tray_by_id(TRAY_ID), menu(app, knowura_mode, autostart)) {
+        let _ = tray.set_menu(Some(menu));
+    }
 }

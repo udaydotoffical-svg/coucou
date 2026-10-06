@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import type { MusicInfo, Settings, WeatherInfo } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -28,12 +28,39 @@ export interface BootInfo {
   hookPath: string;
   /** False where the OS has no global cursor (Wayland): see Island.followPageCursor. */
   cursorPoll: boolean;
+  /** The combo that opens Knowura's text box, when Knowura mode is on and Windows allowed one. */
+  knowuraHotkey: string | null;
 }
 
 export const Bridge = {
   boot: () => call<BootInfo>("boot"),
 
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
+
+  /** Opens (or switches) the Knowura panel — the chat in Knowura mode. */
+  knowuraOpen: (mode: "text" | "voice") => call<void>("knowura_open", { mode }),
+
+  /** Is the camera or the microphone in use right now? */
+  privacyState: () => call<{ camera: boolean; mic: boolean }>("privacy_state"),
+
+  /** Cities matching a name, for choosing where the weather is for. */
+  weatherSearch: (query: string) => callOrThrow<WeatherPlace[]>("weather_search", { query }),
+
+  /** The weather now and the next days at a place. */
+  weatherGet: (lat: number, lon: number, fahrenheit: boolean) =>
+    callOrThrow<Omit<WeatherInfo, "place" | "fahrenheit" | "fetchedAt">>("weather_get", { lat, lon, fahrenheit }),
+
+  /** What is playing now (the island also gets a "music" event on every change). */
+  musicState: () => call<MusicInfo>("music_state"),
+
+  /** The player's buttons: "toggle" | "play" | "pause" | "next" | "prev" | "seek:<seconds>". */
+  musicControl: (action: string) => call<void>("music_control", { action }),
+
+  /** Opens Knowura in the browser with this PC's install id, so signing in there signs the app in too. */
+  knowuraSignInBrowser: () => call<void>("knowura_sign_in_browser"),
+
+  /** Mochi's file drop in Knowura mode: opens the panel and attaches the (inbox) file to its composer. */
+  knowuraAttach: (path: string) => call<void>("knowura_attach", { path }),
 
   /** Shrink the window down to the invisible wake strip (hidden) or back to full. */
   setCollapsed: (collapsed: boolean) => call<void>("set_collapsed", { collapsed }),
@@ -111,6 +138,13 @@ export interface IntegrationUpdate {
 export type ChatContext =
   | { kind: "file"; name: string; path: string }
   | { kind: "window"; appName: string; title: string; url?: string };
+
+export interface WeatherPlace {
+  name: string;
+  detail: string;
+  lat: number;
+  lon: number;
+}
 
 export interface DroppedFile {
   name: string;

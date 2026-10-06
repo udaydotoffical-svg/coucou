@@ -268,6 +268,11 @@ pub fn set_taskbar_visible(win: &WebviewWindow, show: bool) {
     let _ = win.set_skip_taskbar(!show);
 }
 
+/// Only Windows hands out this much about the focused window.
+pub fn foreground_is_ours() -> bool {
+    false
+}
+
 /// Windows needs its style bits put back after tao rewrites them; GTK has none.
 pub fn enforce_taskbar_style(_win: &WebviewWindow, _show: bool) {}
 

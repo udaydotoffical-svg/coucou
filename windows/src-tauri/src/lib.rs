@@ -5,12 +5,16 @@ mod files;
 mod hooks;
 mod integrations;
 mod island;
+mod knowura;
 mod log;
+mod music;
 mod pipe;
+mod privacy;
 mod platform;
 mod secrets;
 mod settings;
 mod tray;
+mod weather;
 
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -24,6 +28,7 @@ use claude::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
 use island::{PollGate, ScreenInfo};
+use knowura::Knowura;
 use pipe::Pending;
 use settings::Settings;
 
@@ -42,6 +47,8 @@ pub struct BootInfo {
     /// False where the OS has no global cursor (Wayland): the page then reports
     /// the cursor from its own mouse events.
     cursor_poll: bool,
+    /// The combo that opens Knowura's text box, when Knowura mode is on and Windows allowed one.
+    knowura_hotkey: Option<String>,
 }
 
 #[tauri::command]
@@ -56,13 +63,14 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         hook_path: settings::hook_exe_path().to_string_lossy().to_string(),
         cursor_poll: platform::CURSOR_POLL,
+        knowura_hotkey: app.state::<Knowura>().hotkey(),
     }
 }
 
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let settings = settings.sanitized();
-    let (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed) = {
+    let (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed, mode_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
         let autostart_changed = current.autostart != settings.autostart;
@@ -70,8 +78,9 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
             || current.island_height_extra != settings.island_height_extra;
         let on_top_changed = current.always_on_top != settings.always_on_top;
         let taskbar_changed = current.show_in_taskbar != settings.show_in_taskbar;
+        let mode_changed = current.assistant_mode != settings.assistant_mode;
         *current = settings.clone();
-        (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed)
+        (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed, mode_changed)
     };
     if let Err(err) = settings::save(&settings) {
         eprintln!("[coucou] could not save settings: {err}");
@@ -82,6 +91,12 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         if let Err(err) = result {
             eprintln!("[coucou] autostart: {err}");
         }
+    }
+    if mode_changed {
+        knowura::apply_mode(&app, settings.assistant_mode == "knowura");
+    }
+    if mode_changed || autostart_changed {
+        tray::refresh(&app);
     }
     if taskbar_changed {
         if let Some(win) = island::window(&app) {
@@ -101,6 +116,72 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     }
     // Keep the other window in step (island ⇄ settings window).
     let _ = app.emit("settings-changed", settings);
+}
+
+/// Opens the Knowura panel ("text" or "voice").
+#[tauri::command]
+fn knowura_open(app: AppHandle, mode: String) {
+    knowura::open(&app, knowura::Mode::parse(&mode));
+}
+
+/// Is the camera or the microphone in use right now (the island also gets a "privacy" event on every change).
+#[tauri::command]
+fn privacy_state() -> privacy::Privacy {
+    privacy::status()
+}
+
+/// Cities matching a name, for choosing where the weather is for.
+#[tauri::command]
+async fn weather_search(query: String) -> Result<Vec<weather::Place>, String> {
+    weather::search(&query).await
+}
+
+/// The weather now and the next few days at a place.
+#[tauri::command]
+async fn weather_get(lat: f64, lon: f64, fahrenheit: bool) -> Result<weather::Weather, String> {
+    weather::fetch(lat, lon, fahrenheit).await
+}
+
+/// The player: what is playing now.
+#[tauri::command]
+fn music_state() -> music::MusicInfo {
+    music::state()
+}
+
+/// The player's buttons: "toggle" | "play" | "pause" | "next" | "prev" | "seek:<seconds>".
+#[tauri::command]
+fn music_control(action: String) {
+    music::control(action);
+}
+
+/// Settings → "Sign in with the browser".
+#[tauri::command]
+fn knowura_sign_in_browser() {
+    knowura::sign_in_browser();
+}
+
+/// Mochi's file drop in Knowura mode: the file lands in the Knowura composer.
+#[tauri::command]
+fn knowura_attach(app: AppHandle, path: String) {
+    knowura::attach_file(&app, &path);
+}
+
+/// The tray's "Start with Windows" entry.
+pub fn toggle_autostart(app: &AppHandle) {
+    let shared = app.state::<Shared>();
+    let updated = {
+        let mut current = shared.settings.lock().unwrap();
+        current.autostart = !current.autostart;
+        let _ = settings::save(&current);
+        current.clone()
+    };
+    let manager = app.autolaunch();
+    let result = if updated.autostart { manager.enable() } else { manager.disable() };
+    if let Err(err) = result {
+        eprintln!("[coucou] autostart: {err}");
+    }
+    tray::refresh(app);
+    let _ = app.emit("settings-changed", updated);
 }
 
 /// Hidden island → shrink the window to the invisible wake strip and park the
@@ -323,7 +404,7 @@ fn log_line(message: String) {
 /// for the *same* arguments as the island (see `additionalBrowserArgs` in
 /// tauri.conf.json) — a mismatch makes the second window come up blank, with no
 /// error anywhere.
-const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
+pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required --js-flags=--max-old-space-size=384";
 
 /// In a dev build the pages are served by Vite, so the second window needs the
 /// absolute dev URL; a bundled build resolves it inside the app bundle.
@@ -388,20 +469,35 @@ pub fn run() {
     let gate = Arc::new(PollGate::new());
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // The "Knowura AI" Start menu entry runs `coucou.exe --knowura`.
+            if argv.iter().any(|a| a == "--knowura") {
+                knowura::open_full(app, "/");
+            } else {
+                let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
+            }
         }))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Shared {
             settings: Mutex::new(loaded.clone()),
             gate: gate.clone(),
         })
         .manage(Pending::default())
         .manage(Chat::default())
+        .manage(Knowura::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
             set_collapsed,
+            knowura_open,
+            knowura_attach,
+            knowura_sign_in_browser,
+            music_state,
+            privacy_state,
+            weather_search,
+            weather_get,
+            music_control,
             set_island_rect,
             focus_window,
             reposition,
@@ -428,7 +524,7 @@ pub fn run() {
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
-            tray::build(&handle)?;
+            tray::build(&handle, loaded.assistant_mode == "knowura", loaded.autostart)?;
             // Before the island: see create_settings_window.
             create_settings_window(&handle);
 
@@ -449,6 +545,19 @@ pub fn run() {
             island::spawn_cursor_poll(handle.clone(), gate.clone());
 
             log::line(format!("--- Coucou {} started ---", env!("CARGO_PKG_VERSION")));
+            if loaded.assistant_mode == "knowura" {
+                knowura::register_hotkey(&handle);
+            }
+            // Started from the "Knowura AI" Start menu entry: show the full app once the
+            // island's own web view is up (the window borrows its user agent).
+            if std::env::args().any(|a| a == "--knowura") {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(2500));
+                    knowura::open_full(&h, "/");
+                });
+            }
+            music::start(handle.clone());
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
