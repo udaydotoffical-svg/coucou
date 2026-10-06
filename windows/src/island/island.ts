@@ -2,7 +2,7 @@
 // Mirrors IslandRootView.swift + IslandWindowController.swift.
 
 import { Tracked, Spring, clamp } from "../core/anim";
-import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
+import { Bridge, IS_TAURI, onDragDrop, onEvent } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, KNOWURA_RADIUS, NOTCH_H, NOTCH_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
@@ -12,6 +12,8 @@ import {
 import { Sound } from "../core/sound";
 import { dominantColor, DEFAULT_COLOR } from "../core/color";
 import { degrees, weatherIcon, weatherLabel } from "../views/weather";
+import { resolveOutfit, type Outfit } from "../mochi/outfits";
+import type { MochiSync } from "../desktop/main";
 import { State, type MusicInfo } from "../core/state";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
@@ -107,7 +109,53 @@ export class Island {
     State.subscribe(() => {
       this.dirty = true;
       this.ensureRunning();
+      this.pushDesktopMochi();
     });
+    // The desktop Mochi's page asks for the current look when it loads, and opens the wardrobe here.
+    void onEvent("mochi-ready", () => this.pushDesktopMochi(true));
+    void onEvent("mochi-wardrobe", () => this.toggleWardrobeFromDesktop());
+  }
+
+  // ── Mochi on the desktop ────────────────────────────────────────────────────
+
+  private botPress: { x: number; y: number } | null = null;
+  private lastDesktopSync = "";
+  private lastAlert = false;
+
+  /**
+   * Tells the desktop Mochi what he should look like (the same state, outfit and headphones as the
+   * island's), and Rust whether something is waiting for an answer, so he goes back to the notch.
+   */
+  private pushDesktopMochi(force = false) {
+    if (!IS_TAURI) return;
+    const alert = !!State.pendingApproval || (State.mode === "expanded" && State.view === "question");
+    if (alert !== this.lastAlert) {
+      this.lastAlert = alert;
+      void Bridge.desktopMochiAlert(alert);
+    }
+    if (!State.settings.desktopMochi && !force) return;
+    const sync: MochiSync = {
+      state: State.effectiveState,
+      outfit: resolveOutfit((State.settings.mochiOutfit || "auto") as Outfit),
+      headphones: State.settings.mochiHeadphones && !!State.music?.active && !!State.music.playing,
+      accent: (State.musicColor as [number, number, number] | null) ?? null,
+      soundEnabled: State.settings.soundEnabled,
+      volume: State.settings.soundVolume,
+    };
+    const key = JSON.stringify(sync);
+    if (key === this.lastDesktopSync && !force) return;
+    this.lastDesktopSync = key;
+    void Bridge.broadcast("mochi-sync", sync);
+  }
+
+  /** Right-click on the desktop Mochi: the wardrobe opens (or closes) on the island. */
+  private toggleWardrobeFromDesktop() {
+    if (State.mode === "expanded" && State.view === "wardrobe") {
+      State.wardrobePreview = null;
+      this.setView(State.defaultView());
+    } else {
+      this.alert("wardrobe");
+    }
   }
 
   // ── DOM ─────────────────────────────────────────────────────────────────────
@@ -265,6 +313,7 @@ export class Island {
           if (!this.wasInIsland) this.fsm.mouseLeft(false);
           break;
         case "home":
+          if (from === "coucou") this.greeting.stop();
           this.expand(State.defaultView());
           if (!this.wasInIsland) this.fsm.mouseLeft(false);
           break;
@@ -287,6 +336,7 @@ export class Island {
     const prev = State.mode;
     if (mode === prev) return;
     State.mode = mode;
+    if (mode !== "expanded") State.activeDiff = null;
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
       Sound.play("close");
@@ -443,6 +493,7 @@ export class Island {
       return;
     }
     const grew = VIEW_LAYOUTS[view].height >= VIEW_LAYOUTS[State.view].height;
+    if (view !== State.view) State.activeDiff = null;
     State.view = view;
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
@@ -709,9 +760,40 @@ export class Island {
         this.fsm.click();
         return;
       }
-      if (this.isBotHit(e.clientX, e.clientY)) {
+      if (e.button === 0 && this.isBotHit(e.clientX, e.clientY)) {
         this.cancelBotHover();
         this.engine.slap();
+        this.botPress = { x: e.clientX, y: e.clientY };
+      }
+    });
+
+    // Pulling Mochi out of the island by his body puts him on the desktop, under the cursor.
+    window.addEventListener("mousemove", (e) => {
+      if (!this.botPress) return;
+      if (e.buttons !== 1) { this.botPress = null; return; }
+      if (Math.hypot(e.clientX - this.botPress.x, e.clientY - this.botPress.y) > 16) {
+        this.botPress = null;
+        void Bridge.desktopMochiPickUp();
+      }
+    });
+    window.addEventListener("mouseup", () => { this.botPress = null; });
+
+    // Right-click on Mochi opens the wardrobe (and closes it again).
+    this.islandEl.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (State.knowuraOpen) return;
+      Sound.resume();
+      State.lastActivity = performance.now();
+      if (State.mode !== "expanded") {
+        this.openWardrobe();
+        return;
+      }
+      if (State.view === "wardrobe") {
+        State.wardrobePreview = null;
+        this.setView(State.defaultView());
+      } else if (this.isBotHit(e.clientX, e.clientY)) {
+        Sound.play("blip");
+        this.setView("wardrobe");
       }
     });
 
@@ -979,10 +1061,30 @@ export class Island {
     this.engine.headphones =
       State.settings.mochiHeadphones && !!State.music?.active && !!State.music.playing;
     this.engine.phoneAccent = State.musicColor;
+    this.engine.setOutfit(this.outfitNow());
     this.engine.update(dt);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, hCss);
     this.engine.draw(ctx, w, hCss);
+  }
+
+  /** The outfit Mochi should wear right now: the previewed one, else the chosen one (by season if "auto"). */
+  private outfitNow(): Outfit {
+    if (State.view === "wardrobe" && State.wardrobePreview != null) return State.wardrobePreview;
+    const chosen = resolveOutfit((State.settings.mochiOutfit || "auto") as Outfit);
+    // Only the big Mochi wears it, and only while he is the one in front: when the focus is on another
+    // agent in the open island he is bare. Closed, and in the wardrobe, he always wears it.
+    if (State.mode === "expanded" && State.view !== "wardrobe") {
+      const mainId = State.settings.mainAvatar || "integration_claude";
+      if (State.focusId && State.focusId !== mainId) return "none";
+    }
+    return chosen;
+  }
+
+  /** Right-click on the closed island: open it onto the wardrobe. */
+  private openWardrobe() {
+    Sound.play("blip");
+    this.alert("wardrobe");
   }
 
   /** BotCanvasView.lookX / lookY — tanh of the distance to the bot. */

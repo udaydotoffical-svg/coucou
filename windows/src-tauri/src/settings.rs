@@ -57,6 +57,14 @@ pub struct Settings {
     /// Colour overrides for individual Mochis: avatar id → "#rrggbb".
     #[serde(default)]
     pub mochi_colors: HashMap<String, String>,
+    /// What Mochi wears: an outfit id, "auto" (by season) or "none".
+    #[serde(default = "auto_outfit")]
+    pub mochi_outfit: String,
+    /// Mochi lives on the desktop, outside the notch (and where he was last left, in pixels).
+    #[serde(default)]
+    pub desktop_mochi: bool,
+    #[serde(default)]
+    pub desktop_mochi_pos: Option<(i32, i32)>,
     /// Weather: the city chosen in the settings (empty = none yet) and where it is.
     #[serde(default)]
     pub weather_place: String,
@@ -117,6 +125,16 @@ fn default_island_width() -> f64 {
     640.0
 }
 
+/// The outfits Mochi can wear (src/mochi/outfits.ts); anything else becomes "auto".
+const OUTFITS: &[&str] = &[
+    "auto", "none", "partyHat", "beanie", "crown", "sunglasses", "roundGlasses", "bow", "scarf",
+    "witchHat", "pumpkin", "santaHat", "bunnyEars",
+];
+
+fn auto_outfit() -> String {
+    "auto".to_string()
+}
+
 fn yes() -> bool {
     true
 }
@@ -136,6 +154,9 @@ impl Settings {
         });
         if self.mochi_colors.len() > 24 {
             self.mochi_colors.clear();
+        }
+        if !OUTFITS.contains(&self.mochi_outfit.as_str()) {
+            self.mochi_outfit = auto_outfit();
         }
         self.weather_place.truncate(80);
         self.weather_lat = self.weather_lat.clamp(-90.0, 90.0);
@@ -183,6 +204,9 @@ impl Default for Settings {
             show_music_on_notch: true,
             mochi_headphones: true,
             mochi_colors: HashMap::new(),
+            mochi_outfit: auto_outfit(),
+            desktop_mochi: false,
+            desktop_mochi_pos: None,
             weather_place: String::new(),
             weather_lat: 0.0,
             weather_lon: 0.0,

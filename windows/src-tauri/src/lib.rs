@@ -3,6 +3,8 @@
 mod claude;
 mod files;
 mod hooks;
+mod desktop;
+mod github;
 mod integrations;
 mod island;
 mod knowura;
@@ -70,6 +72,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let settings = settings.sanitized();
+    let desktop_changed;
     let (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed, mode_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
@@ -79,7 +82,11 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         let on_top_changed = current.always_on_top != settings.always_on_top;
         let taskbar_changed = current.show_in_taskbar != settings.show_in_taskbar;
         let mode_changed = current.assistant_mode != settings.assistant_mode;
-        *current = settings.clone();
+        desktop_changed = current.desktop_mochi != settings.desktop_mochi;
+        // Where he was left is the desktop module's to remember, not the page's.
+        let mut settings = settings.clone();
+        settings.desktop_mochi_pos = current.desktop_mochi_pos;
+        *current = settings;
         (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed, mode_changed)
     };
     if let Err(err) = settings::save(&settings) {
@@ -91,6 +98,10 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         if let Err(err) = result {
             eprintln!("[coucou] autostart: {err}");
         }
+    }
+    if desktop_changed {
+        desktop::set_enabled(&app, settings.desktop_mochi);
+        tray::refresh(&app);
     }
     if mode_changed {
         knowura::apply_mode(&app, settings.assistant_mode == "knowura");
@@ -228,6 +239,56 @@ fn open_url(url: String) {
         return;
     }
     platform::open_url(&url);
+}
+
+/// The ↗ on a file diff: opens the file in VS Code when `code` is on PATH, otherwise shows its folder.
+/// The path comes from a hook payload, so only an existing file given by its full path goes any
+/// further, and it is never handed to the shell or "opened" by whatever handles its type (a script
+/// Claude just wrote must not run because someone tapped an arrow).
+#[tauri::command]
+fn open_changed_file(path: String) -> bool {
+    let p = std::path::Path::new(&path);
+    if !(p.is_absolute() && p.is_file()) {
+        return false;
+    }
+    if let Some(code) = platform::find_on_path("code") {
+        let mut cmd = Command::new(code);
+        cmd.arg("--").arg(p);
+        if platform::no_console(&mut cmd).spawn().is_ok() {
+            return true;
+        }
+    }
+    match p.parent() {
+        Some(dir) => {
+            platform::reveal_folder(&dir.to_string_lossy());
+            true
+        }
+        None => false,
+    }
+}
+
+/// The desktop Mochi's page asks to be carried (a press that became a drag).
+#[tauri::command]
+fn desktop_mochi_drag(app: AppHandle) {
+    desktop::begin_drag(&app);
+}
+
+/// A double click on the desktop Mochi, or the island's "bring him home".
+#[tauri::command]
+fn desktop_mochi_home(app: AppHandle) {
+    desktop::fly_home(&app);
+}
+
+/// The island's Mochi was dragged out of it.
+#[tauri::command]
+fn desktop_mochi_pick_up(app: AppHandle) {
+    desktop::pick_up(&app);
+}
+
+/// An approval or a question started or stopped waiting: Mochi goes back to the notch to show it.
+#[tauri::command]
+fn desktop_mochi_alert(app: AppHandle, active: bool) {
+    desktop::set_alert(&app, active);
 }
 
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
@@ -503,6 +564,11 @@ pub fn run() {
             reposition,
             open_url,
             open_in_vscode,
+            open_changed_file,
+            desktop_mochi_drag,
+            desktop_mochi_home,
+            desktop_mochi_pick_up,
+            desktop_mochi_alert,
             quit_app,
             hooks_status,
             hooks_preview,
@@ -561,6 +627,9 @@ pub fn run() {
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
+            github::start(handle.clone());
+            desktop::start(handle.clone());
+            desktop::register_hotkey(&handle);
             Ok(())
         })
         .run(tauri::generate_context!())

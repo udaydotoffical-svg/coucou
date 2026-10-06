@@ -6,13 +6,17 @@ import { DEFAULT_COLOR, palette } from "../core/color";
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { buildWeather, degrees, refreshWeather, weatherIcon } from "./weather";
+import { buildWardrobe } from "./wardrobe";
+import { buildDiffCard } from "./diffcard";
+import { isDiffStep } from "../core/diff";
 import { Ticker } from "./ticker";
 import { State, type AgentTask } from "../core/state";
+import { Bridge } from "../core/bridge";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
-import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
+import { githubKey, renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
 
 export interface ViewActions {
   setView(v: IslandViewName): void;
@@ -144,7 +148,12 @@ export function buildHeader(actions: ViewActions): ViewHost {
 // ── Overview ──────────────────────────────────────────────────────────────────
 
 function buildOverview(actions: ViewActions): ViewHost {
-  const ticker = new Ticker();
+  const ticker = new Ticker((diffId) => {
+    const task = State.focusTask;
+    if (!task) return;
+    State.activeDiff = { taskId: task.id, id: diffId };
+    State.notify();
+  });
   const who = h("div", { class: "who" });
   const tickerBody = h("div", { class: "card-body" }, who, ticker.el);
   const leftBody = h("div", { class: "left-body" });
@@ -153,7 +162,11 @@ function buildOverview(actions: ViewActions): ViewHost {
     { class: "icon-btn jump", title: "Open", onclick: () => actions.openTarget() },
     svg(ICONS.arrowUpRight, 8),
   );
-  const left = card(null, leftBody, jump);
+  const diffCard = buildDiffCard(() => {
+    State.activeDiff = null;
+    State.notify();
+  });
+  const left = card(null, leftBody, diffCard.el, jump);
   // The right side. With music: two small squares for unselected avatars and the player
   // under them. Without: the original grid of pills.
   const squares = h("div", { class: "duo" });
@@ -200,6 +213,11 @@ function buildOverview(actions: ViewActions): ViewHost {
       const task = State.focusTask;
       if (task?.id !== lastFocus) {
         lastFocus = task?.id ?? null;
+        // Looking at GitHub: bring its numbers up to date if they are a minute old.
+        if (task?.id === "integration_github" && State.settings.activeIntegrations.includes(task.id)) {
+          const age = Date.now() - (State.githubPulse?.fetchedAt ?? 0);
+          if (age > 60_000) void Bridge.refreshIntegration(task.id);
+        }
         detailOpen = false;
         cardKey = "";
         mode = null;
@@ -236,6 +254,7 @@ function buildOverview(actions: ViewActions): ViewHost {
           task.id, detailOpen, task.state, task.steps.join("|"),
           info?.loaded, info?.error, info?.configured,
           JSON.stringify(info?.data ?? {}),
+          task.id === "integration_github" ? githubKey() : "",
         ].join("~");
         if (key !== cardKey) {
           cardKey = key;
@@ -245,7 +264,13 @@ function buildOverview(actions: ViewActions): ViewHost {
         }
       }
 
-      jump.style.display = detailOpen ? "none" : "";
+      // The diff of a file the agent changed, over the ticker, until it is dismissed.
+      const ad = State.activeDiff;
+      const open = ad && task && ad.taskId === task.id ? State.sessionDiffs.get(ad.taskId)?.find((d) => d.id === ad.id) : null;
+      if (ad && !open) State.activeDiff = null;
+      diffCard.show(open ?? null);
+
+      jump.style.display = detailOpen || open ? "none" : "";
 
       const showPlayer = !!State.music?.active;
       rightcol.style.display = showPlayer ? "" : "none";
@@ -685,7 +710,7 @@ function buildFinished(actions: ViewActions): ViewHost {
     sync() {
       clear(who);
       who.append(agentWho(State.focusTask, "Claude Code finished"));
-      title.textContent = State.focusTask?.steps.at(-1) ?? "Session finished";
+      title.textContent = [...(State.focusTask?.steps ?? [])].reverse().find((s) => !isDiffStep(s)) ?? "Session finished";
     },
   };
 }
@@ -800,6 +825,7 @@ export function buildViews(
   const map = new Map<IslandViewName, ViewHost>();
   map.set("overview", buildOverview(actions));
   map.set("weather", buildWeather(actions));
+  map.set("wardrobe", buildWardrobe(actions));
   map.set("empty", buildEmpty(actions));
   map.set("approval", buildApproval(actions));
   map.set("question", buildQuestion());

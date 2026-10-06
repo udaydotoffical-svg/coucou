@@ -81,6 +81,11 @@ fn enabled(app: &AppHandle, id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the pill is switched on, for pollers that keep their own schedule (src/github.rs).
+pub fn wanted(app: &AppHandle, id: &str) -> bool {
+    enabled(app, id)
+}
+
 fn spawn<F, Fut>(app: AppHandle, id: &'static str, delay_secs: u64, every_secs: u64, poll: F)
 where
     F: Fn(AppHandle) -> Fut + Send + 'static,
@@ -107,7 +112,10 @@ where
 pub async fn poll_once(app: AppHandle, id: &str) {
     match id {
         "integration_stripe" => poll_stripe(app).await,
-        "integration_github" => poll_github(app).await,
+        "integration_github" => {
+            poll_github(app.clone()).await;
+            crate::github::refresh(app).await;
+        }
         "integration_vercel" => poll_vercel(app).await,
         "integration_n8n" => poll_n8n(app).await,
         "integration_resend" => poll_resend(app).await,

@@ -3,6 +3,9 @@
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
 import type { RGB } from "./color";
+import type { Outfit } from "../mochi/outfits";
+import type { FileDiff } from "./diff";
+import type { GitHubActivity, GitHubPulse } from "./github";
 
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
@@ -158,6 +161,10 @@ export interface Settings {
   mochiHeadphones: boolean;
   /** Colour overrides for individual Mochis: avatar id → "#rrggbb". */
   mochiColors: Record<string, string>;
+  /** What Mochi wears: an outfit id, "auto" (by season) or "none". */
+  mochiOutfit: string;
+  /** Mochi lives on the desktop, outside the notch. */
+  desktopMochi: boolean;
   /** Weather: the chosen city (empty = none yet), where it is, units, and whether to show it. */
   weatherPlace: string;
   weatherLat: number;
@@ -199,6 +206,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showMusicOnNotch: true,
   mochiHeadphones: true,
   mochiColors: {},
+  mochiOutfit: "auto",
+  desktopMochi: false,
   weatherPlace: "",
   weatherLat: 0,
   weatherLon: 0,
@@ -241,6 +250,9 @@ class AppState {
 
   /** Camera / microphone in use (Windows' own usage records). */
   privacy = { camera: false, mic: false };
+
+  /** The outfit Mochi wears while the pointer is over a wardrobe tile. */
+  wardrobePreview: Outfit | null = null;
 
   weather: WeatherInfo | null = null;
   weatherError: string | null = null;
@@ -309,6 +321,39 @@ class AppState {
     t.steps.push(step);
     if (t.steps.length > 20) t.steps.shift();
     t.stepIndex = t.steps.length - 1;
+    this.notify();
+  }
+
+  // ── GitHub ──
+  githubPulse: GitHubPulse | null = null;
+  githubActivity: GitHubActivity | null = null;
+
+  // ── Live diff ──
+  /** The file changes of the current session, per agent, in order of arrival. */
+  sessionDiffs = new Map<string, FileDiff[]>();
+  private nextDiffId = 0;
+  private diffTimers = new Map<string, number>();
+  /** The diff open in the overview, if any. */
+  activeDiff: { taskId: string; id: number } | null = null;
+
+  /** Keeps a diff (at most 50 per agent) and returns the id its ticker step carries. */
+  appendSessionDiff(id: string, diff: FileDiff): number {
+    const d = { ...diff, id: this.nextDiffId++ };
+    const list = this.sessionDiffs.get(id) ?? [];
+    list.push(d);
+    while (list.length > 50) list.shift();
+    this.sessionDiffs.set(id, list);
+    // Forgotten after an hour without a new one.
+    window.clearTimeout(this.diffTimers.get(id));
+    this.diffTimers.set(id, window.setTimeout(() => this.clearSessionDiffs(id), 3_600_000));
+    return d.id;
+  }
+
+  clearSessionDiffs(id: string) {
+    window.clearTimeout(this.diffTimers.get(id));
+    this.diffTimers.delete(id);
+    this.sessionDiffs.delete(id);
+    if (this.activeDiff?.taskId === id) this.activeDiff = null;
     this.notify();
   }
 

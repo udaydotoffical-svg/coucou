@@ -485,6 +485,11 @@ function layoutSection(): HTMLElement {
       toggle(settings.mochiHeadphones, (v) => { settings.mochiHeadphones = v; void save(); }),
       h("span", { class: "hint", text: "Mochi puts headphones on while music plays" }),
     ),
+    h("div", { class: "row" },
+      h("label", { text: "Mochi on the desktop" }),
+      toggle(settings.desktopMochi, (v) => { settings.desktopMochi = v; void save(); }),
+      h("span", { class: "hint", text: "He leaves the notch and lives on your desktop. Drag him to move him, double-click to send him home, right-click for the wardrobe. Drag the notch's Mochi out to put him there, or press Ctrl+Alt+D." }),
+    ),
   );
 }
 

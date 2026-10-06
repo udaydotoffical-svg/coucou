@@ -8,6 +8,10 @@ import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { State, type AgentTask } from "../core/state";
 import { Bridge } from "../core/bridge";
+import {
+  CI_COLOR, contributionColor, dayLabel, lastDays, lastWeeks, worstCI,
+  type GitHubActivity, type GitHubPR, type GitHubRepoCI, type GitHubSection,
+} from "../core/github";
 
 /** Same shape as the Swift `timeAgo` computed properties. */
 export function timeAgo(value: unknown): string {
@@ -211,6 +215,190 @@ function statRow(icon: string, color: string, label: string, value: string): HTM
   );
 }
 
+/** The part of the GitHub card that can change without the integration data changing. */
+export function githubKey(): string {
+  return `${State.githubPulse?.fetchedAt ?? 0}|${State.githubActivity?.fetchedAt ?? 0}|${ghSection}`;
+}
+
+/** Which list the GitHub detail shows; set before opening it. */
+let ghSection: GitHubSection = "myPRs";
+export function openGitHubSection(section: GitHubSection) {
+  ghSection = section;
+}
+
+function ghOpen(url: string) {
+  try {
+    if (new URL(url).hostname === "github.com") void Bridge.openUrl(url);
+  } catch { /* not a URL: nothing to open */ }
+}
+
+function githubStatButton(icon: string, color: string, label: string, value: string, onTap: () => void): HTMLElement {
+  const row = statRow(icon, color, label, value);
+  row.classList.add("tap");
+  row.addEventListener("click", onTap);
+  return row;
+}
+
+/** Stars and the last seven days of contributions: opens the activity. */
+function githubHeaderExtra(onTap: () => void): HTMLElement {
+  const stats = get("integration_github");
+  const act = State.githubActivity;
+  const box = h("button", { class: "gh-mini", title: "Activity", onclick: onTap });
+  if (stats.totalStars != null) box.append(h("span", { text: `\u2605 ${fmtCount(Number(stats.totalStars))}` }));
+  if (act) {
+    const row = h("span", { class: "gh-days" });
+    for (const d of lastDays(act, 7)) {
+      const sq = h("i");
+      sq.style.background = contributionColor(d.level);
+      row.append(sq);
+    }
+    box.append(row);
+  } else if (stats.totalStars == null) {
+    box.append(h("span", { text: "Overview" }));
+  }
+  return box;
+}
+
+const fmtCount = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** The GitHub card once the pulse has arrived: pull requests, reviews, the default branch's CI. */
+function githubPulseCard(onSection: (s: GitHubSection) => void): HTMLElement {
+  const pulse = State.githubPulse!;
+  const prs = pulse.myPRs;
+  const failing = prs.filter((p) => p.ci === "failure").length;
+  const running = prs.filter((p) => p.ci === "pending").length;
+  const prValue = !prs.length ? "0" : failing ? `${prs.length} \u00b7 ${failing} failing` : running ? `${prs.length} \u00b7 running` : String(prs.length);
+
+  const main = worstCI(pulse.mainCI);
+  const mainFailing = pulse.mainCI.filter((r) => r.ci === "failure").length;
+  const [mainIcon, mainValue] =
+    main === "failure" ? [ICONS.sealFail, `${mainFailing} failing`]
+    : main === "pending" ? [ICONS.seal, "running"]
+    : main === "success" ? [ICONS.seal, "all green"]
+    : [ICONS.seal, pulse.mainCI.length ? "unknown" : "no repos"];
+
+  const stats = h(
+    "div",
+    { class: "int-stats" },
+    githubStatButton(ICONS.pullRequest, CI_COLOR[worstCI(prs)], "My PRs", prValue, () => onSection("myPRs")),
+    githubStatButton(ICONS.eye, pulse.toReview.length ? "#8AB4F8" : "#6B7079", "To review", String(pulse.toReview.length), () => onSection("toReview")),
+    githubStatButton(mainIcon, CI_COLOR[main], "Default branch CI", mainValue, () => onSection("mainCI")),
+  );
+  for (const icon of stats.querySelectorAll(".int-stat-icon svg")) {
+    // These are line icons.
+    (icon as SVGElement).querySelector("path")?.setAttribute("fill", "none");
+    (icon as SVGElement).querySelector("path")?.setAttribute("stroke", "currentColor");
+    (icon as SVGElement).querySelector("path")?.setAttribute("stroke-width", "1.8");
+    (icon as SVGElement).querySelector("path")?.setAttribute("stroke-linecap", "round");
+    (icon as SVGElement).querySelector("path")?.setAttribute("stroke-linejoin", "round");
+  }
+  return h(
+    "div",
+    { class: "int-card" },
+    header("#F4505E", "GitHub", "", githubHeaderExtra(() => onSection("activity"))),
+    stats,
+  );
+}
+
+function ghPRRow(pr: GitHubPR, showCI: boolean): HTMLElement {
+  const dotEl = h("i", { class: "gh-dot" });
+  dotEl.style.background = showCI && pr.ci !== "unknown" ? CI_COLOR[pr.ci] : "transparent";
+  return h(
+    "button",
+    { class: "gh-row", title: pr.title, onclick: () => ghOpen(pr.url) },
+    dotEl,
+    h("span", { class: "gh-ref", text: `${pr.repo.split("/").pop() ?? pr.repo}#${pr.number}` }),
+    h("span", { class: "gh-title", text: pr.title }),
+    pr.isDraft ? h("span", { class: "gh-draft", text: "Draft" }) : null,
+  );
+}
+
+function ghRepoRow(repo: GitHubRepoCI): HTMLElement {
+  const word = { failure: "failing", pending: "running", success: "passing", unknown: "" }[repo.ci];
+  const dotEl = h("i", { class: "gh-dot" });
+  dotEl.style.background = repo.ci === "unknown" ? "transparent" : CI_COLOR[repo.ci];
+  const word_ = h("span", { class: "gh-word", text: word });
+  word_.style.color = CI_COLOR[repo.ci];
+  return h(
+    "button",
+    {
+      class: "gh-row",
+      title: `${repo.repo} · ${repo.branch}`,
+      onclick: () => ghOpen(repo.url.endsWith("/") ? `${repo.url}actions` : `${repo.url}/actions`),
+    },
+    dotEl,
+    h("span", { class: "gh-ref", text: repo.repo.split("/").pop() ?? repo.repo }),
+    h("span", { class: "gh-title", text: repo.branch }),
+    word_,
+  );
+}
+
+function ghActivityDetail(act: GitHubActivity | null, onBack: () => void): HTMLElement {
+  const stats = get("integration_github");
+  const right = h("button", { class: "gh-right" });
+  const grid = h("div", { class: "gh-grid" });
+  const setRight = (text: string) => { right.textContent = text; };
+  const login = State.githubPulse?.login;
+  right.addEventListener("click", () => { if (login) ghOpen(`https://github.com/${login}`); });
+
+  const summary = () => {
+    if (!act) return "";
+    const total = act.total.toLocaleString("en-US");
+    return stats.totalRepos != null ? `${total} past year \u00b7 ${stats.totalRepos} repos` : `${total} past year`;
+  };
+  setRight(summary());
+
+  if (act) {
+    for (const week of lastWeeks(act, 23)) {
+      const col = h("div", { class: "gh-week" });
+      for (let dow = 0; dow < 7; dow++) {
+        const day = week.find((d) => d.weekday === dow);
+        const sq = h("i");
+        if (day) {
+          sq.style.background = contributionColor(day.level);
+          const label = `${dayLabel(day.date)} \u00b7 ${day.count === 0 ? "No contributions" : day.count === 1 ? "1 contribution" : `${day.count} contributions`}`;
+          sq.addEventListener("mouseenter", () => setRight(label));
+          sq.addEventListener("mouseleave", () => setRight(summary()));
+          sq.addEventListener("click", () => setRight(label));
+        } else sq.style.visibility = "hidden";
+        col.append(sq);
+      }
+      grid.append(col);
+    }
+  } else {
+    grid.append(h("div", { class: "int-status", text: "Loading\u2026" }));
+  }
+  return h(
+    "div",
+    { class: "int-card detail" },
+    h("div", { class: "int-detail-head" },
+      h("button", { class: "int-back", onclick: onBack }, svg(ICONS.chevronLeft, 10, { stroke: 2.4 })),
+      h("b", { class: "keep", text: "Activity" }),
+      act ? right : null),
+    grid,
+  );
+}
+
+function githubDetail(onBack: () => void): HTMLElement {
+  const pulse = State.githubPulse!;
+  if (ghSection === "activity") return ghActivityDetail(State.githubActivity, onBack);
+  const title = { myPRs: "My PRs", toReview: "To review", mainCI: "Default branch CI", activity: "Activity" }[ghSection];
+  const rows = h("div", { class: "gh-list" });
+  const items = ghSection === "myPRs" ? pulse.myPRs : ghSection === "toReview" ? pulse.toReview : [];
+  const repos = ghSection === "mainCI" ? pulse.mainCI : [];
+  for (const pr of items) rows.append(ghPRRow(pr, ghSection === "myPRs"));
+  for (const r of repos) rows.append(ghRepoRow(r));
+  if (!items.length && !repos.length) rows.append(h("div", { class: "int-status", text: "Nothing here" }));
+  return h(
+    "div",
+    { class: "int-card detail" },
+    h("div", { class: "int-detail-head" },
+      h("button", { class: "int-back", onclick: onBack }, svg(ICONS.chevronLeft, 10, { stroke: 2.4 })),
+      h("b", { text: title })),
+    rows,
+  );
+}
+
 function githubCard(): HTMLElement {
   const d = get("integration_github");
   const stars = Number(d.totalStars ?? 0);
@@ -391,7 +579,7 @@ export function hasIntegrationData(id: string): boolean {
     case "integration_resend":
       return arr(id, "emails").length > 0;
     case "integration_github":
-      return get(id).totalRepos != null;
+      return get(id).totalRepos != null || State.githubPulse != null;
     case "integration_stripe":
       return info.loaded;
     case "integration_notion":
@@ -412,6 +600,11 @@ export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHoo
   }
   if (task.id === "integration_vercel" && hasIntegrationData(task.id)) {
     return hooks.detailOpen ? vercelDetail(hooks.closeDetail) : vercelCard(hooks.openDetail);
+  }
+  if (task.id === "integration_github" && State.githubPulse && hasIntegrationData(task.id)) {
+    return hooks.detailOpen
+      ? githubDetail(hooks.closeDetail)
+      : githubPulseCard((section) => { ghSection = section; hooks.openDetail(); });
   }
   if (!hasIntegrationData(task.id)) return idleCard(task, hooks.openSettings);
 

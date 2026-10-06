@@ -7,7 +7,7 @@ export const SOUND_NAMES = [
   "peek", "open", "close", "hover", "blip", "slap", "annoyed", "dizzy", "greet",
   "work", "finish", "error", "approval", "question", "approve", "gulp", "tick",
   "send", "love", "pop", "proud", "wink", "yawn", "attach", "think", "search",
-  "rate", "sleep",
+  "rate", "sleep", "greeting",
 ] as const;
 
 export type SoundName = (typeof SOUND_NAMES)[number];
@@ -21,6 +21,8 @@ class SoundEngine {
   private buffers = new Map<string, AudioBuffer>();
   private loading: Promise<void> | null = null;
   private idleTimer: number | null = null;
+  /** The voices still playing, by name, so one can be faded out. */
+  private voices = new Map<string, { src: AudioBufferSourceNode; gain: GainNode }>();
 
   /** Creates the context and decodes every WAV. Safe to call more than once. */
   preload(): Promise<void> {
@@ -97,8 +99,30 @@ class SoundEngine {
     if (ctx.state === "suspended") void ctx.resume();
     const src = ctx.createBufferSource();
     src.buffer = buf;
-    src.connect(master);
+    const gain = ctx.createGain();
+    src.connect(gain);
+    gain.connect(master);
     src.start();
+    const voice = { src, gain };
+    this.voices.set(name, voice);
+    src.onended = () => {
+      if (this.voices.get(name) === voice) this.voices.delete(name);
+    };
+  }
+
+  /** Fades the latest voice of a sound to silence over `seconds`, then stops it. */
+  fadeOut(name: SoundName | string, seconds: number) {
+    const voice = this.voices.get(name);
+    const ctx = this.ctx;
+    if (!voice || !ctx) return;
+    this.voices.delete(name);
+    const now = ctx.currentTime;
+    voice.gain.gain.cancelScheduledValues(now);
+    voice.gain.gain.setValueAtTime(voice.gain.gain.value, now);
+    voice.gain.gain.linearRampToValueAtTime(0, now + seconds);
+    try {
+      voice.src.stop(now + seconds + 0.02);
+    } catch { /* already stopped */ }
   }
 }
 

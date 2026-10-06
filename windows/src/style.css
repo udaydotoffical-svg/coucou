@@ -2001,3 +2001,317 @@ input[type="range"]::-webkit-slider-thumb {
 .wx-chip .wx-where {
   max-width: 96px;
 }
+
+/* The wardrobe: a grid of outfit tiles beside Mochi. */
+.wd-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.wd-head .title {
+  font: 600 12px var(--font);
+}
+
+.wd-head .sub {
+  font: 500 11px var(--font);
+  color: #8e939c;
+}
+
+.wd-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wd-tile {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.wd-tile:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.wd-tile.on {
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.wd-auto {
+  position: absolute;
+  bottom: -3px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 3px;
+  border-radius: 3px;
+  background: #000;
+  color: #fff;
+  font: 700 6px var(--font);
+  letter-spacing: 0.3px;
+  pointer-events: none;
+}
+
+/* Live diff: a file row in the ticker, and the card that shows its lines. */
+.ticker-row.diff {
+  cursor: pointer;
+}
+
+.diff-counts {
+  display: flex;
+  gap: 5px;
+  flex: 0 0 auto;
+  font: 500 10px ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.diff-counts .add {
+  color: #22c55e;
+}
+
+.diff-counts .del {
+  color: #f4505e;
+}
+
+.diffcard {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: none;
+  flex-direction: column;
+  padding: 10px 10px 8px 108px;
+  background: var(--card, #17181b);
+  border-radius: inherit;
+}
+
+.diffcard.on {
+  display: flex;
+  animation: diff-in 0.16s ease-in;
+}
+
+@keyframes diff-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.diffcard .dc-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+
+.diffcard .dc-back {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: #f5f6f8;
+  font: 600 12px var(--font);
+  cursor: pointer;
+}
+
+.diffcard .dc-back span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diffcard .dc-note {
+  font: 500 10.5px var(--font);
+  color: #6b7079;
+}
+
+.diffcard .dc-lines {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.diffcard .dc-lines::-webkit-scrollbar {
+  display: none;
+}
+
+.dl {
+  display: flex;
+  font: 400 10.5px ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: #6b7079;
+  white-space: pre;
+}
+
+.dl i {
+  flex: 0 0 12px;
+  font-style: normal;
+  color: #454850;
+}
+
+.dl span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dl.add {
+  background: rgba(34, 197, 94, 0.12);
+  color: #86efac;
+}
+
+.dl.add i {
+  color: #22c55e;
+}
+
+.dl.del {
+  background: rgba(244, 80, 94, 0.12);
+  color: #fca5a5;
+}
+
+.dl.del i {
+  color: #f4505e;
+}
+
+/* GitHub: the pulse card, its lists and the contribution calendar. */
+.int-stat.tap {
+  cursor: pointer;
+  border-radius: 5px;
+}
+
+.int-stat.tap:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.gh-mini {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 2px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: #8e939c;
+  font: 400 11px var(--font);
+  cursor: pointer;
+}
+
+.gh-days {
+  display: flex;
+  gap: 2px;
+}
+
+.gh-days i,
+.gh-week i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+}
+
+.gh-list {
+  max-height: 62px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  margin-top: 4px;
+  padding-right: 8px;
+}
+
+.gh-list::-webkit-scrollbar {
+  display: none;
+}
+
+.gh-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  height: 20px;
+  padding: 0 2px;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  font: 400 11px var(--font);
+  color: #c5c8cd;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gh-row:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.gh-dot {
+  flex: 0 0 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+
+.gh-ref {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: #9398a1;
+}
+
+.gh-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-draft {
+  font-size: 9.5px;
+  color: #6b7079;
+}
+
+.gh-word {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.gh-right {
+  margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: #8e939c;
+  font: 400 11px var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.gh-grid {
+  display: flex;
+  gap: 1.5px;
+  margin-top: 7px;
+}
+
+.gh-week {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5px;
+}
+
+.int-detail-head b.keep {
+  flex: 0 0 auto;
+}

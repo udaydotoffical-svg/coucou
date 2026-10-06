@@ -962,7 +962,11 @@ pub fn open_full(app: &AppHandle, path: &str) {
 /// fallback combo is used instead. Returns the combo that is active.
 pub fn register_hotkey(app: &AppHandle) -> Option<String> {
     let shortcuts = app.global_shortcut();
-    let _ = shortcuts.unregister_all();
+    for combo in HOTKEYS {
+        if let Ok(shortcut) = combo.parse::<Shortcut>() {
+            let _ = shortcuts.unregister(shortcut);
+        }
+    }
     let k = state(app);
     for combo in HOTKEYS {
         let Ok(shortcut) = combo.parse::<Shortcut>() else { continue };
@@ -984,7 +988,11 @@ pub fn register_hotkey(app: &AppHandle) -> Option<String> {
 }
 
 pub fn unregister_hotkey(app: &AppHandle) {
-    let _ = app.global_shortcut().unregister_all();
+    for combo in HOTKEYS {
+        if let Ok(shortcut) = combo.parse::<Shortcut>() {
+            let _ = app.global_shortcut().unregister(shortcut);
+        }
+    }
     *state(app).hotkey.lock().unwrap() = None;
 }
 

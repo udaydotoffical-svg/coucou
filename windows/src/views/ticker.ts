@@ -11,6 +11,7 @@ import { h, svg } from "./dom";
 import { ICONS } from "./icons";
 import { cubicBezier, clamp, lerp } from "../core/anim";
 import type { AgentTask } from "../core/state";
+import { parseDiffStep } from "../core/diff";
 
 const ROW_H = 22;
 /** One step transition, milliseconds. */
@@ -26,7 +27,10 @@ interface Row {
   check: SVGElement;
   shimmer: HTMLElement;
   dim: HTMLElement;
+  counts: HTMLElement;
   text: string;
+  /** The diff this row stands for (a file the agent changed), if any. */
+  diffId: number | null;
 }
 
 function makeRow(): Row {
@@ -40,20 +44,31 @@ function makeRow(): Row {
     class: "tick-text",
     style: "position:absolute;left:0;right:0;color:#6b7079",
   });
+  const counts = h("span", { class: "diff-counts" });
   const el = h(
     "div",
     { class: "ticker-row" },
     h("span", { class: "tick-icon", style: "position:relative" }, chevron, check),
     h("span", { style: "position:relative;flex:1 1 auto;min-width:0" }, shimmer, dim),
+    counts,
   );
-  return { el, chevron, check, shimmer, dim, text: "" };
+  return { el, chevron, check, shimmer, dim, counts, text: "", diffId: null };
 }
 
 function setText(row: Row, text: string) {
   if (row.text === text) return;
   row.text = text;
-  row.shimmer.textContent = text;
-  row.dim.textContent = text;
+  const diff = parseDiffStep(text);
+  const label = diff ? diff.filename : text;
+  row.shimmer.textContent = label;
+  row.dim.textContent = label;
+  row.diffId = diff ? diff.diffId : null;
+  row.el.classList.toggle("diff", !!diff);
+  row.counts.replaceChildren();
+  if (diff) {
+    if (diff.added > 0) row.counts.append(h("span", { class: "add", text: `+${diff.added}` }));
+    if (diff.removed > 0) row.counts.append(h("span", { class: "del", text: `\u2212${diff.removed}` }));
+  }
 }
 
 /**
@@ -79,8 +94,14 @@ export class Ticker {
   private startMs: number | null = null;
   private displayIndex = -1;
 
-  constructor() {
+  constructor(onDiffTap?: (diffId: number) => void) {
     this.el = h("div", { class: "ticker" }, this.a.el, this.b.el, this.c.el);
+    // A tap on a row that stands for a file opens that file's diff.
+    for (const row of [this.a, this.b]) {
+      row.el.addEventListener("click", () => {
+        if (row.diffId != null) onDiffTap?.(row.diffId);
+      });
+    }
     this.rest();
   }
 

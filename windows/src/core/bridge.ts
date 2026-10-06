@@ -3,7 +3,7 @@
 // `npm run dev` alone.
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { MusicInfo, Settings, WeatherInfo } from "./state";
 
@@ -80,6 +80,16 @@ export const Bridge = {
   openUrl: (url: string) => call<void>("open_url", { url }),
 
   /** "Open terminal" → opens the folder in VS Code when `code` is on PATH. */
+  /** Mochi on the desktop: a press became a drag, a double click, the island's Mochi pulled out, an alert. */
+  desktopMochiDrag: () => call<void>("desktop_mochi_drag"),
+  desktopMochiHome: () => call<void>("desktop_mochi_home"),
+  desktopMochiPickUp: () => call<void>("desktop_mochi_pick_up"),
+  desktopMochiAlert: (active: boolean) => call<void>("desktop_mochi_alert", { active }),
+  /** An event for every window (the desktop Mochi's page and the island talk this way). */
+  broadcast: (name: string, payload: unknown = null) => (IS_TAURI ? emit(name, payload) : Promise.resolve()),
+
+  /** The ↗ on a file diff. */
+  openChangedFile: (path: string) => call<boolean>("open_changed_file", { path }),
   openInVSCode: (path: string | null) => call<boolean>("open_in_vscode", { path }),
 
   quit: () => call<void>("quit_app"),

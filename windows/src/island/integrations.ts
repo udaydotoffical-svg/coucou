@@ -5,6 +5,7 @@
 import { onEvent, Bridge, type IntegrationUpdate } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
+import { githubAlert, githubEvents, type GitHubActivity, type GitHubPulse } from "../core/github";
 import type { Island } from "./island";
 
 /** Which Credential Manager key backs each pill. */
@@ -22,6 +23,11 @@ const clearTimers = new Map<string, number>();
 
 export function registerIntegrationHandlers(island: Island) {
   void onEvent<IntegrationUpdate>("integration", (update) => handle(island, update));
+  void onEvent<GitHubPulse>("github-pulse", (pulse) => handlePulse(island, pulse));
+  void onEvent<GitHubActivity>("github-activity", (activity) => {
+    State.githubActivity = activity;
+    State.notify();
+  });
   void refreshConfigured();
 }
 
@@ -37,6 +43,21 @@ export async function refreshConfigured() {
     data: {}, error: null, loaded: false, configured: false,
   };
   State.integrations.integration_claude = { ...claude, configured: hooks };
+  State.notify();
+}
+
+/** A new pulse: keep it, and flag what changed (a failing CI, a review request, a green PR) on the pill. */
+function handlePulse(island: Island, pulse: GitHubPulse) {
+  if (State.paused) return;
+  const alert = githubAlert(githubEvents(State.githubPulse, pulse));
+  State.githubPulse = pulse;
+  if (alert) {
+    const task = State.tasks.find((t) => t.id === "integration_github");
+    // The badge is for a pill that is not the one in front.
+    if (task && State.focusId !== "integration_github") task.pillBadge = alert.badge;
+    Sound.play(alert.sound);
+    island.reveal();
+  }
   State.notify();
 }
 

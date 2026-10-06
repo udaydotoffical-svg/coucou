@@ -6,6 +6,7 @@
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
+import { diffFromTool, diffName, makeDiffStep, toOneLine } from "../core/diff";
 import type { Island } from "./island";
 
 const CLAUDE_ID = "integration_claude";
@@ -132,6 +133,7 @@ function clearSession() {
   if (!t) return;
   t.steps = [];
   t.stepIndex = 0;
+  State.clearSessionDiffs(t.id);
   t.name = "VS Code";
   t.pillBadge = null;
 }
@@ -208,9 +210,16 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
     }
 
-    case "PostToolUse":
+    case "PostToolUse": {
       State.updateTask(agentId, "working");
+      // Live diff for Edit / MultiEdit / Write: a ticker row for the file, a tap away from the lines.
+      const diff = diffFromTool(payload.tool_name ?? "", payload.tool_input ?? {});
+      if (diff) {
+        const id = State.appendSessionDiff(agentId, diff);
+        State.appendStep(agentId, makeDiffStep(diffName(diff), diff.added, diff.removed, id));
+      }
       break;
+    }
 
     case "PostToolUseFailure":
       State.updateTask(agentId, "working");
@@ -232,7 +241,10 @@ function handleHook(island: Island, payload: HookPayload) {
 
     case "Stop":
       State.updateTask(agentId, "finished");
-      if (payload.message) State.appendStep(agentId, payload.message.slice(0, 60));
+      if (payload.message) {
+        const line = toOneLine(payload.message);
+        if (line) State.appendStep(agentId, line);
+      }
       Sound.play("finish");
       if (focused) surface("finished", true);
       else State.setPillBadge(agentId, "finished");

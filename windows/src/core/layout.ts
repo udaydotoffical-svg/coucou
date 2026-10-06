@@ -23,7 +23,8 @@ export type IslandViewName =
   | "settings"
   | "greeting"
   | "knowura"
-  | "weather";
+  | "weather"
+  | "wardrobe";
 
 export type BotStateName =
   | "idle"
@@ -131,6 +132,7 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   greeting: { height: 150, botX: 320, botY: 90, botDiameter: 0, agentMode: "none" },
   knowura: { height: KNOWURA_ISLAND_H, botX: 0, botY: 0, botDiameter: 0, agentMode: "none" },
   weather: { height: 160, botX: 56, botY: null, botDiameter: 48, agentMode: "column" },
+  wardrobe: { height: 160, botX: 68, botY: null, botDiameter: 58, agentMode: "none" },
 };
 
 /** The overview is taller while the music player is in it. */

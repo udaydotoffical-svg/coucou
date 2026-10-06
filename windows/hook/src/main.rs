@@ -33,6 +33,9 @@ const DROPPED_FIELDS: &[&str] = &["tool_response", "transcript_path"];
 /// Longest string forwarded for any single field; the island truncates to far
 /// less than this anyway.
 const MAX_FIELD_LEN: usize = 2_000;
+/// What a file change (Edit, MultiEdit, Write, once it is done) may carry: the live diff
+/// needs the whole text. The island refuses to diff anything over 200 KB in total anyway.
+const MAX_DIFF_FIELD_LEN: usize = 200 * 1024;
 
 #[cfg(windows)]
 mod win;
@@ -161,7 +164,12 @@ fn read_event() -> Option<(String, String)> {
         }
     }
 
-    truncate_strings(&mut payload);
+    let is_file_change = event == "PostToolUse"
+        && matches!(
+            payload.get("tool_name").and_then(|v| v.as_str()),
+            Some("Edit" | "MultiEdit" | "Write")
+        );
+    truncate_strings(&mut payload, if is_file_change { MAX_DIFF_FIELD_LEN } else { MAX_FIELD_LEN });
 
     let mut line = payload.to_string();
     line.push('\n');
@@ -169,12 +177,12 @@ fn read_event() -> Option<(String, String)> {
 }
 
 /// Caps every string in the payload. A single Write can carry a whole file.
-fn truncate_strings(value: &mut serde_json::Value) {
+fn truncate_strings(value: &mut serde_json::Value, limit: usize) {
     match value {
         serde_json::Value::String(s) => {
-            if s.len() > MAX_FIELD_LEN {
+            if s.len() > limit {
                 // Cut on a char boundary; a lone byte index can split UTF-8.
-                let mut end = MAX_FIELD_LEN;
+                let mut end = limit;
                 while end > 0 && !s.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -182,8 +190,8 @@ fn truncate_strings(value: &mut serde_json::Value) {
                 s.push('…');
             }
         }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(truncate_strings),
-        serde_json::Value::Object(map) => map.values_mut().for_each(truncate_strings),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|v| truncate_strings(v, limit)),
+        serde_json::Value::Object(map) => map.values_mut().for_each(|v| truncate_strings(v, limit)),
         _ => {}
     }
 }
@@ -248,7 +256,7 @@ mod tests {
     #[test]
     fn long_strings_are_cut_on_a_char_boundary() {
         let mut v = serde_json::json!({ "tool_input": { "content": "é".repeat(4000) } });
-        truncate_strings(&mut v);
+        truncate_strings(&mut v, MAX_FIELD_LEN);
         let s = v["tool_input"]["content"].as_str().unwrap();
         assert!(s.len() <= MAX_FIELD_LEN + 4);
         assert!(s.ends_with('…'));
