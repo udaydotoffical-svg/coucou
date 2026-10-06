@@ -165,6 +165,10 @@ export interface Settings {
   mochiOutfit: string;
   /** Mochi lives on the desktop, outside the notch. */
   desktopMochi: boolean;
+  /** Knowura Speak: hold Ctrl+Win, talk, and the words are typed where you were typing. */
+  speakEnabled: boolean;
+  speakModel: string;
+  speakLanguage: string;
   /** Weather: the chosen city (empty = none yet), where it is, units, and whether to show it. */
   weatherPlace: string;
   weatherLat: number;
@@ -208,6 +212,9 @@ export const DEFAULT_SETTINGS: Settings = {
   mochiColors: {},
   mochiOutfit: "auto",
   desktopMochi: false,
+  speakEnabled: false,
+  speakModel: "base.en",
+  speakLanguage: "en",
   weatherPlace: "",
   weatherLat: 0,
   weatherLon: 0,

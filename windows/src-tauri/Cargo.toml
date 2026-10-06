@@ -26,6 +26,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+# Knowura Speak: the microphone, and Whisper run on the CPU in pure Rust (no C toolchain needed).
+cpal = "0.15"
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+tokenizers = { version = "0.21", default-features = false, features = ["unstable_wasm"] }
 keyring = { version = "3", features = ["windows-native"] }
 windows = { version = "0.61", features = [
   "Foundation",
@@ -33,7 +39,9 @@ windows = { version = "0.61", features = [
   "Media_Control",
   "Storage_Streams",
   "Win32_System_Com",
+  "Win32_System_LibraryLoader",
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_System_Ole",

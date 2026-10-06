@@ -931,7 +931,24 @@ export class Island {
     requestAnimationFrame(this.frame);
   }
 
+  /** One frame. A failure in it is written to the log and the next frame still runs: an exception
+   *  here used to end the loop for good, with the island frozen mid-animation. */
   private frame = (nowMs: number) => {
+    try {
+      this.frameBody(nowMs);
+    } catch (err) {
+      const text = String((err as Error)?.stack ?? err).slice(0, 600);
+      if (text !== this.lastFrameError) {
+        this.lastFrameError = text;
+        void Bridge.log(`frame error: ${text}`);
+      }
+      requestAnimationFrame(this.frame);
+    }
+  };
+
+  private lastFrameError = "";
+
+  private frameBody(nowMs: number) {
     const dt = Math.min(0.05, (nowMs - this.lastFrame) / 1000);
     this.lastFrame = nowMs;
 
@@ -994,7 +1011,7 @@ export class Island {
       this.running = false;
       Sound.idle();
     }
-  };
+  }
 
   private updateBotTargets() {
     const p = botPosition(

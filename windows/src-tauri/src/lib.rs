@@ -17,6 +17,10 @@ mod secrets;
 mod settings;
 mod tray;
 mod weather;
+#[cfg(windows)]
+mod speak;
+#[cfg(windows)]
+mod whisper;
 
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -73,6 +77,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let settings = settings.sanitized();
     let desktop_changed;
+    let speak_changed;
     let (screen_changed, autostart_changed, size_changed, on_top_changed, taskbar_changed, mode_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
@@ -83,6 +88,7 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         let taskbar_changed = current.show_in_taskbar != settings.show_in_taskbar;
         let mode_changed = current.assistant_mode != settings.assistant_mode;
         desktop_changed = current.desktop_mochi != settings.desktop_mochi;
+        speak_changed = current.speak_enabled != settings.speak_enabled;
         // Where he was left is the desktop module's to remember, not the page's.
         let mut settings = settings.clone();
         settings.desktop_mochi_pos = current.desktop_mochi_pos;
@@ -99,6 +105,12 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
             eprintln!("[coucou] autostart: {err}");
         }
     }
+    #[cfg(windows)]
+    if speak_changed {
+        speak::apply(&app);
+    }
+    #[cfg(not(windows))]
+    let _ = speak_changed;
     if desktop_changed {
         desktop::set_enabled(&app, settings.desktop_mochi);
         tray::refresh(&app);
@@ -290,6 +302,40 @@ fn desktop_mochi_pick_up(app: AppHandle) {
 fn desktop_mochi_alert(app: AppHandle, active: bool) {
     desktop::set_alert(&app, active);
 }
+
+/// Knowura Speak: the models the settings page offers, and whether each is on disk.
+#[cfg(windows)]
+#[tauri::command]
+fn speak_models() -> Vec<speak::ModelRow> {
+    speak::model_rows()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn speak_models() -> Vec<()> {
+    Vec::new()
+}
+
+/// Downloads a model, only because the user asked for it in the settings.
+#[cfg(windows)]
+#[tauri::command]
+async fn speak_download(app: AppHandle, id: String) {
+    whisper::download(app, id).await;
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+async fn speak_download(_id: String) {}
+
+#[cfg(windows)]
+#[tauri::command]
+fn speak_delete(id: String) {
+    whisper::delete(&id);
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn speak_delete(_id: String) {}
 
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
 /// and falls back to the file manager otherwise.
@@ -565,6 +611,9 @@ pub fn run() {
             open_url,
             open_in_vscode,
             open_changed_file,
+            speak_models,
+            speak_download,
+            speak_delete,
             desktop_mochi_drag,
             desktop_mochi_home,
             desktop_mochi_pick_up,
@@ -630,6 +679,8 @@ pub fn run() {
             github::start(handle.clone());
             desktop::start(handle.clone());
             desktop::register_hotkey(&handle);
+            #[cfg(windows)]
+            speak::apply(&handle);
             Ok(())
         })
         .run(tauri::generate_context!())

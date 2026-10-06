@@ -65,6 +65,14 @@ pub struct Settings {
     pub desktop_mochi: bool,
     #[serde(default)]
     pub desktop_mochi_pos: Option<(i32, i32)>,
+    /// Knowura Speak: hold Ctrl+Win, talk, and the words are typed where you were typing.
+    #[serde(default)]
+    pub speak_enabled: bool,
+    /// Which Whisper model (src/whisper.rs) and which language it should listen for.
+    #[serde(default = "speak_model_default")]
+    pub speak_model: String,
+    #[serde(default = "speak_language_default")]
+    pub speak_language: String,
     /// Weather: the city chosen in the settings (empty = none yet) and where it is.
     #[serde(default)]
     pub weather_place: String,
@@ -131,6 +139,14 @@ const OUTFITS: &[&str] = &[
     "witchHat", "pumpkin", "santaHat", "bunnyEars",
 ];
 
+fn speak_model_default() -> String {
+    "base.en".to_string()
+}
+
+fn speak_language_default() -> String {
+    "en".to_string()
+}
+
 fn auto_outfit() -> String {
     "auto".to_string()
 }
@@ -157,6 +173,14 @@ impl Settings {
         }
         if !OUTFITS.contains(&self.mochi_outfit.as_str()) {
             self.mochi_outfit = auto_outfit();
+        }
+        // Only a model we know of (the name becomes a folder), and a plain language code.
+        const SPEAK_MODELS: &[&str] = &["tiny.en", "base.en", "small.en", "base", "small"];
+        if !SPEAK_MODELS.contains(&self.speak_model.as_str()) {
+            self.speak_model = speak_model_default();
+        }
+        if self.speak_language.len() > 3 || !self.speak_language.chars().all(|c| c.is_ascii_lowercase()) || self.speak_language.is_empty() {
+            self.speak_language = speak_language_default();
         }
         self.weather_place.truncate(80);
         self.weather_lat = self.weather_lat.clamp(-90.0, 90.0);
@@ -207,6 +231,9 @@ impl Default for Settings {
             mochi_outfit: auto_outfit(),
             desktop_mochi: false,
             desktop_mochi_pos: None,
+            speak_enabled: false,
+            speak_model: speak_model_default(),
+            speak_language: speak_language_default(),
             weather_place: String::new(),
             weather_lat: 0.0,
             weather_lon: 0.0,

@@ -9,6 +9,10 @@ import { registerHookHandlers } from "./island/hooks";
 import { refreshWeather, startWeather } from "./views/weather";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
 
+// Anything that goes wrong in the page is written to the log, where a bug report can find it.
+window.addEventListener("error", (e) => void Bridge.log(`js error: ${e.message} at ${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => void Bridge.log(`js rejection: ${String(e.reason).slice(0, 300)}`));
+
 async function main() {
   const root = document.getElementById("root");
   if (!root) return;
