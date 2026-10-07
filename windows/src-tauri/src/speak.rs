@@ -477,8 +477,15 @@ fn run(app: AppHandle, rx: Receiver<Hold>) {
                     continue;
                 }
                 phase(&app, "thinking", None);
-                let pcm = resample_16k(&raw, rate);
+                let mut pcm = resample_16k(&raw, rate);
                 let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+                // A quiet microphone makes Whisper guess: bring the loudest sound up to a normal level.
+                let peak = pcm.iter().fold(0f32, |m, v| m.max(v.abs()));
+                if peak > 0.0 && peak < 0.5 {
+                    let gain = (0.6 / peak).min(30.0);
+                    pcm.iter_mut().for_each(|v| *v *= gain);
+                }
+                log::line(format!("speak: heard {:.1}s, peak {:.3}, level {:.4}", seconds, peak, rms));
                 if rms < 0.002 {
                     phase(&app, "silent", Some("I didn't hear anything.".into()));
                     hide_later(&app, 1600);

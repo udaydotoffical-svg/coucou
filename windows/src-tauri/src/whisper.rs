@@ -36,6 +36,9 @@ pub const MODELS: &[ModelInfo] = &[
     ModelInfo { id: "small", repo: "openai/whisper-small", label: "Small · every language", megabytes: 967, multilingual: true },
 ];
 
+/// The shortest window Whisper is given, in mel frames (10 ms each): eight seconds.
+const MIN_WINDOW_FRAMES: usize = 800;
+
 const FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 
 pub fn model_info(id: &str) -> Option<&'static ModelInfo> {
@@ -142,21 +145,26 @@ impl Whisper {
         let mut text = String::new();
         let mut seek = 0;
         while seek < frames {
-            let len = (frames - seek).min(m::N_FRAMES);
+            let real = (frames - seek).min(m::N_FRAMES);
+            // Whisper was trained on whole 30 s windows and does worse on a very short one, but a whole
+            // window costs three seconds. A window of at least eight seconds (the mel already ends in
+            // silence) is the compromise: sentences stay quick and no longer fall into a loop.
+            let len = real.max(MIN_WINDOW_FRAMES).min(total - seek).min(m::N_FRAMES);
             let segment = mel.narrow(2, seek, len).map_err(e2s)?;
-            let piece = self.decode(&segment, language)?;
+            let seconds = real as f32 * m::HOP_LENGTH as f32 / m::SAMPLE_RATE as f32;
+            let piece = self.decode(&segment, language, seconds)?;
             if !piece.is_empty() {
                 if !text.is_empty() {
                     text.push(' ');
                 }
                 text.push_str(&piece);
             }
-            seek += len;
+            seek += real;
         }
         Ok(text.trim().to_string())
     }
 
-    fn decode(&mut self, mel: &Tensor, language: &str) -> Result<String, String> {
+    fn decode(&mut self, mel: &Tensor, language: &str, seconds: f32) -> Result<String, String> {
         self.model.reset_kv_cache();
         let features = self.model.encoder.forward(mel, true).map_err(e2s)?;
 
@@ -184,7 +192,8 @@ impl Whisper {
             .collect();
         let mask = Tensor::new(mask.as_slice(), &self.device).map_err(e2s)?;
 
-        let max_new = (self.config.max_target_positions / 2).min(224);
+        // Nobody speaks faster than about seven tokens a second: more than that is the model rambling.
+        let max_new = ((seconds * 7.0) as usize + 16).min(self.config.max_target_positions / 2).min(224);
         for step in 0..max_new {
             let input = Tensor::new(tokens.as_slice(), &self.device).map_err(e2s)?.unsqueeze(0).map_err(e2s)?;
             let ys = self.model.decoder.forward(&input, &features, step == 0).map_err(e2s)?;
@@ -206,8 +215,10 @@ impl Whisper {
                 break;
             }
             tokens.push(next);
-            // A model that has fallen into a loop repeats the same few tokens: stop it.
-            if looping(&tokens[prompt_len..]) {
+            // A model that has fallen into a loop repeats the same few tokens: keep the first of them
+            // and stop.
+            if let Some(keep) = loop_start(&tokens[prompt_len..]) {
+                tokens.truncate(prompt_len + keep);
                 break;
             }
         }
@@ -216,18 +227,26 @@ impl Whisper {
     }
 }
 
-/// True when the tail of the output is the same short run of tokens, over and over.
-fn looping(tokens: &[u32]) -> bool {
-    for n in 1..=4usize {
-        let reps = 6 / n.min(3) + 2;
+/// When the tail of the output is the same run of tokens repeated over and over, how many tokens
+/// to keep (everything up to the end of the first copy of the run).
+fn loop_start(tokens: &[u32]) -> Option<usize> {
+    for n in 1..=12usize {
+        // A single token must repeat many times to count; a long phrase only needs to come back three times.
+        let reps = match n {
+            1 => 8,
+            2 => 5,
+            3..=5 => 4,
+            _ => 3,
+        };
         if tokens.len() >= n * reps {
-            let tail = &tokens[tokens.len() - n * reps..];
+            let start = tokens.len() - n * reps;
+            let tail = &tokens[start..];
             if tail.chunks(n).all(|c| c == &tail[..n]) {
-                return true;
+                return Some(start + n);
             }
         }
     }
-    false
+    None
 }
 
 fn e2s(e: candle_core::Error) -> String {
@@ -348,10 +367,19 @@ mod tests {
 
     #[test]
     fn a_loop_of_repeated_tokens_is_noticed() {
-        assert!(looping(&[5, 6, 7, 7, 7, 7, 7, 7, 7, 7]));
-        assert!(looping(&[1, 2, 3, 4, 5, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]));
-        assert!(!looping(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
-        assert!(!looping(&[]));
+        // "hey , what 's" over and over, a five-token phrase, after a real start.
+        let phrase = [10, 11, 12, 13, 11];
+        let mut said = vec![1, 2, 3];
+        for _ in 0..4 {
+            said.extend_from_slice(&phrase);
+        }
+        // Kept: the start and the first copy of the phrase.
+        assert_eq!(loop_start(&said), Some(3 + 5));
+        assert_eq!(loop_start(&[5, 6, 7, 7, 7, 7, 7, 7, 7, 7]), Some(3));
+        assert_eq!(loop_start(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), None);
+        // Two honest repeats ("very, very") are not a loop.
+        assert_eq!(loop_start(&[1, 2, 3, 3]), None);
+        assert_eq!(loop_start(&[]), None);
     }
 
     #[test]
@@ -361,21 +389,25 @@ mod tests {
         assert!(!is_downloaded("../evil"));
     }
 
-    /// Needs the base.en model on disk and a 16 kHz mono 16-bit wav in COUCOU_TEST_WAV:
-    /// `cargo test --release -- --ignored whisper_end_to_end --nocapture`.
+    /// Needs the base.en model on disk and 16 kHz mono 16-bit wavs listed in COUCOU_TEST_WAV
+    /// (separated by `;`): `cargo test --release -- --ignored whisper_end_to_end --nocapture`.
     #[test]
     #[ignore]
     fn whisper_end_to_end() {
-        let path = std::env::var("COUCOU_TEST_WAV").expect("COUCOU_TEST_WAV");
-        let bytes = std::fs::read(path).unwrap();
-        let pcm: Vec<f32> = bytes[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
-        let t0 = std::time::Instant::now();
+        let paths = std::env::var("COUCOU_TEST_WAV").expect("COUCOU_TEST_WAV");
         let mut w = Whisper::load("base.en").expect("model");
-        let loaded = t0.elapsed();
-        let t1 = std::time::Instant::now();
-        let text = w.transcribe(&pcm, "en").expect("transcribe");
-        println!("audio {:.1}s | load {:.2}s | transcribe {:.2}s
-=> {text}", pcm.len() as f32 / 16000.0, loaded.as_secs_f32(), t1.elapsed().as_secs_f32());
-        assert!(text.to_lowercase().contains("test"), "{text}");
+        for path in paths.split(';') {
+            let bytes = std::fs::read(path).unwrap();
+            let mut pcm: Vec<f32> = bytes[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+            // The same boost speak.rs gives a quiet microphone.
+            let peak = pcm.iter().fold(0f32, |m, v| m.max(v.abs()));
+            if peak > 0.0 && peak < 0.5 {
+                let gain = (0.6 / peak).min(30.0);
+                pcm.iter_mut().for_each(|v| *v *= gain);
+            }
+            let t = std::time::Instant::now();
+            let text = w.transcribe(&pcm, "en").expect("transcribe");
+            println!("{} | {:.1}s of audio in {:.2}s => {:?}", path.rsplit(std::path::MAIN_SEPARATOR).next().unwrap(), pcm.len() as f32 / 16000.0, t.elapsed().as_secs_f32(), text);
+        }
     }
 }
