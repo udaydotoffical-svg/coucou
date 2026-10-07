@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "What Coucou's page may do. Everything that touches the network or the keys goes through Coucou's own commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
