@@ -7,14 +7,6 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { MusicInfo, Settings, WeatherInfo } from "./state";
 
-export interface SpeakModel {
-  id: string;
-  label: string;
-  megabytes: number;
-  multilingual: boolean;
-  downloaded: boolean;
-}
-
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -95,11 +87,6 @@ export const Bridge = {
   desktopMochiAlert: (active: boolean) => call<void>("desktop_mochi_alert", { active }),
   /** An event for every window (the desktop Mochi's page and the island talk this way). */
   broadcast: (name: string, payload: unknown = null) => (IS_TAURI ? emit(name, payload) : Promise.resolve()),
-
-  /** Knowura Speak: the speech models and whether each is downloaded; download and delete. */
-  speakModels: () => call<SpeakModel[]>("speak_models"),
-  speakDownload: (id: string) => call<void>("speak_download", { id }),
-  speakDelete: (id: string) => call<void>("speak_delete", { id }),
 
   /** The ↗ on a file diff. */
   openChangedFile: (path: string) => call<boolean>("open_changed_file", { path }),

@@ -19,8 +19,6 @@ mod tray;
 mod weather;
 #[cfg(windows)]
 mod speak;
-#[cfg(windows)]
-mod whisper;
 
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -303,40 +301,6 @@ fn desktop_mochi_alert(app: AppHandle, active: bool) {
     desktop::set_alert(&app, active);
 }
 
-/// Knowura Speak: the models the settings page offers, and whether each is on disk.
-#[cfg(windows)]
-#[tauri::command]
-fn speak_models() -> Vec<speak::ModelRow> {
-    speak::model_rows()
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-fn speak_models() -> Vec<()> {
-    Vec::new()
-}
-
-/// Downloads a model, only because the user asked for it in the settings.
-#[cfg(windows)]
-#[tauri::command]
-async fn speak_download(app: AppHandle, id: String) {
-    whisper::download(app, id).await;
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-async fn speak_download(_id: String) {}
-
-#[cfg(windows)]
-#[tauri::command]
-fn speak_delete(id: String) {
-    whisper::delete(&id);
-}
-
-#[cfg(not(windows))]
-#[tauri::command]
-fn speak_delete(_id: String) {}
-
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
 /// and falls back to the file manager otherwise.
 #[tauri::command]
@@ -611,9 +575,6 @@ pub fn run() {
             open_url,
             open_in_vscode,
             open_changed_file,
-            speak_models,
-            speak_download,
-            speak_delete,
             desktop_mochi_drag,
             desktop_mochi_home,
             desktop_mochi_pick_up,

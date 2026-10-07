@@ -169,6 +169,8 @@ export interface Settings {
   speakEnabled: boolean;
   speakModel: string;
   speakLanguage: string;
+  /** Names and words Whisper should spell your way. */
+  speakWords: string;
   /** Weather: the chosen city (empty = none yet), where it is, units, and whether to show it. */
   weatherPlace: string;
   weatherLat: number;
@@ -213,8 +215,9 @@ export const DEFAULT_SETTINGS: Settings = {
   mochiOutfit: "auto",
   desktopMochi: false,
   speakEnabled: false,
-  speakModel: "base.en",
-  speakLanguage: "en",
+  speakModel: "whisper-large-v3-turbo",
+  speakLanguage: "auto",
+  speakWords: "Knowura, Coucou, Mochi",
   weatherPlace: "",
   weatherLat: 0,
   weatherLon: 0,

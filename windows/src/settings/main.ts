@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus, type SpeakModel } from "../core/bridge";
+import { Bridge, onEvent, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, INTEGRATION_AGENTS, type Settings } from "../core/state";
 import { COMPACT_HEIGHT_MAX, COMPACT_HEIGHT_MIN, ISLAND_HEIGHT_EXTRA_MAX, ISLAND_HEIGHT_EXTRA_MIN, ISLAND_WIDTH_MAX, ISLAND_WIDTH_MIN } from "../core/layout";
 import { h, clear } from "../views/dom";
@@ -496,77 +496,40 @@ function layoutSection(): HTMLElement {
 // ── Knowura Speak section ─────────────────────────────────────────────────────
 
 const SPEAK_LANGUAGES: [string, string][] = [
-  ["en", "English"], ["fr", "Français"], ["es", "Español"], ["de", "Deutsch"], ["it", "Italiano"],
+  ["auto", "Automatic"], ["en", "English"], ["fr", "Français"], ["es", "Español"], ["de", "Deutsch"], ["it", "Italiano"],
   ["pt", "Português"], ["nl", "Nederlands"], ["pl", "Polski"], ["tr", "Türkçe"], ["ru", "Русский"],
   ["ja", "日本語"], ["zh", "中文"], ["ko", "한국어"], ["hi", "हिन्दी"], ["ar", "العربية"],
 ];
 
 function speakSection(): HTMLElement {
-  const list = h("div", { class: "speak-models" });
-  const progress = new Map<string, string>();
-  let models: SpeakModel[] = [];
-
-  const render = () => {
-    clear(list);
-    for (const m of models) {
-      const selected = settings.speakModel === m.id;
-      const busy = progress.get(m.id);
-      const status = busy
-        ? h("span", { class: "hint", text: busy })
-        : m.downloaded
-          ? h("button", {
-              text: "Delete",
-              onclick: async () => {
-                await Bridge.speakDelete(m.id);
-                await refresh();
-              },
-            })
-          : h("button", {
-              text: `Download · ${m.megabytes >= 1000 ? (m.megabytes / 1000).toFixed(1) + " GB" : m.megabytes + " MB"}`,
-              onclick: () => {
-                progress.set(m.id, "Starting…");
-                render();
-                void Bridge.speakDownload(m.id);
-              },
-            });
-      const pick = h("button", {
-        class: selected ? "switch on" : "switch",
-        "aria-pressed": selected,
-        title: m.downloaded ? "Use this model" : "Use this model (download it first)",
-        onclick: () => {
-          settings.speakModel = m.id;
-          void save();
-          render();
-        },
-      });
-      list.append(h("div", { class: "row" }, h("label", { text: m.label }), pick, status));
-    }
-  };
-
-  const refresh = async () => {
-    models = (await Bridge.speakModels()) ?? [];
-    render();
-  };
-  void refresh();
-  void onEvent<{ model: string; state: string; done: number; total: number; message: string | null }>("speak-model", (p) => {
-    if (p.state === "downloading") {
-      const pct = p.total ? Math.min(99, Math.floor((p.done / p.total) * 100)) : 0;
-      progress.set(p.model, `Downloading… ${pct}%`);
-      render();
-    } else {
-      progress.delete(p.model);
-      if (p.state === "error") progress.set(p.model, p.message ?? "The download failed.");
-      void refresh();
-    }
-  });
-
   const language = h("select", {}) as HTMLSelectElement;
-  for (const [code, name] of SPEAK_LANGUAGES) {
-    language.append(h("option", { value: code, text: name }));
-  }
+  for (const [code, name] of SPEAK_LANGUAGES) language.append(h("option", { value: code, text: name }));
   language.value = settings.speakLanguage;
   language.addEventListener("change", () => {
     settings.speakLanguage = language.value;
+    void save();
+  });
+
+  const model = h("select", {}) as HTMLSelectElement;
+  model.append(
+    h("option", { value: "whisper-large-v3-turbo", text: "Turbo (fastest)" }),
+    h("option", { value: "whisper-large-v3", text: "Large v3 (most accurate)" }),
+  );
+  model.value = settings.speakModel;
+  model.addEventListener("change", () => {
+    settings.speakModel = model.value;
+    void save();
+  });
+
+  const words = h("input", {
+    type: "text",
+    value: settings.speakWords,
+    placeholder: "Knowura, Coucou, Mochi",
+    style: "flex:1 1 auto;min-width:0",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+  words.addEventListener("change", () => {
+    settings.speakWords = words.value.slice(0, 300);
     void save();
   });
 
@@ -574,18 +537,26 @@ function speakSection(): HTMLElement {
     "section",
     {},
     h("h2", {}, h("span", { text: "Knowura Speak" })),
-    h("div", { class: "hint", text: "Hold Ctrl+Win, talk, let go: the words are typed wherever you were typing, and a small Mochi in headphones listens above your cursor, dressed in his usual outfit. Whisper runs on this PC: your voice never leaves it and is never saved." }),
+    h("div", { class: "hint", text: "Hold Ctrl+Win, talk, let go: the words are typed wherever you were typing, and a small Mochi in headphones listens above your cursor, dressed in his usual outfit. Your voice is sent to Groq's Whisper with your own key when you let go; it is never saved on this PC." }),
     h("div", { class: "row" },
       h("label", { text: "Knowura Speak" }),
       toggle(settings.speakEnabled, (v) => { settings.speakEnabled = v; void save(); }),
       h("span", { class: "hint", text: "Watches for Ctrl+Win only while this is on" }),
     ),
-    h("div", { class: "hint", text: "Speech model. Nothing is downloaded until you press Download; the files come from huggingface.co (openai/whisper-*) and stay on this PC. Bigger is more accurate and slower. The English ones are faster; \"every language\" understands French, Spanish and the rest." }),
-    list,
+    h("div", { class: "hint", text: "Your Groq API key (console.groq.com). It stays in the Windows Credential Manager." }),
+    ...(() => {
+      const k = keyRow("groq-api-key", "gsk_…", "No key yet: Knowura Speak needs one.");
+      return [k.row, h("div", { class: "row" }, k.dot, k.state), k.feedback];
+    })(),
+    h("div", { class: "row" }, h("label", { text: "Model" }), model),
     h("div", { class: "row" },
       h("label", { text: "Language" }),
       language,
-      h("span", { class: "hint", text: "Only used by the \"every language\" models" }),
+      h("span", { class: "hint", text: "Automatic works for most people" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Words to spell your way" }),
+      words,
     ),
   );
 }

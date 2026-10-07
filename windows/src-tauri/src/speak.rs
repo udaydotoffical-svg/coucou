@@ -6,7 +6,7 @@
 // * While it is held the default microphone is recorded and a small Mochi with headphones appears
 //   above your text caret (or where the pointer is, in apps that do not report a caret).
 // * On release the audio goes through Whisper on this PC (src/whisper.rs) and the text is typed
-//   into whatever has the focus. The audio never leaves the machine and is never written to disk.
+//   into whatever has the focus.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -31,7 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYUP,
 };
 
-use crate::{log, platform, whisper};
+use crate::{log, platform, secrets};
 
 pub const LABEL: &str = "speak";
 const HOLD_MS: u64 = 180;
@@ -44,13 +44,30 @@ const VK_NOTHING: u16 = 0xE8;
 
 // ── Settings, as the rest of the app sees them ────────────────────────────────
 
-fn config(app: &AppHandle) -> (bool, String, String) {
+struct Config {
+    enabled: bool,
+    model: String,
+    language: String,
+    words: String,
+}
+
+fn config(app: &AppHandle) -> Config {
     app.try_state::<crate::Shared>()
         .map(|s| {
             let s = s.settings.lock().unwrap();
-            (s.speak_enabled, s.speak_model.clone(), s.speak_language.clone())
+            Config {
+                enabled: s.speak_enabled,
+                model: s.speak_model.clone(),
+                language: s.speak_language.clone(),
+                words: s.speak_words.clone(),
+            }
         })
-        .unwrap_or((false, "base.en".into(), "en".into()))
+        .unwrap_or(Config {
+            enabled: false,
+            model: "whisper-large-v3-turbo".into(),
+            language: "auto".into(),
+            words: String::new(),
+        })
 }
 
 // ── Keyboard hook ─────────────────────────────────────────────────────────────
@@ -420,16 +437,87 @@ fn phase(app: &AppHandle, phase: &'static str, message: Option<String>) {
     let _ = app.emit_to(LABEL, "speak-phase", Phase { phase, message });
 }
 
-// ── The loop that ties it together ────────────────────────────────────────────
+// ── Groq ──────────────────────────────────────────────────────────────────────
 
-struct Loaded {
-    id: String,
-    model: whisper::Whisper,
-    last_used: Instant,
+/// 16 kHz mono 16-bit PCM as an in-memory .wav (nothing touches the disk).
+fn wav_bytes(pcm: &[f32]) -> Vec<u8> {
+    let data_len = (pcm.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&16_000u32.to_le_bytes());
+    out.extend_from_slice(&32_000u32.to_le_bytes()); // bytes per second
+    out.extend_from_slice(&2u16.to_le_bytes()); // bytes per frame
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for v in pcm {
+        out.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+    }
+    out
 }
 
+fn http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(40))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+/// Speech to text on Groq's Whisper. Returns the text, or a sentence for the user.
+fn transcribe(key: &str, cfg: &Config, wav: Vec<u8>) -> Result<String, String> {
+    tauri::async_runtime::block_on(async {
+        let part = reqwest::multipart::Part::bytes(wav)
+            .file_name("speech.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| e.to_string())?;
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", part)
+            .text("model", cfg.model.clone())
+            .text("response_format", "json")
+            .text("temperature", "0");
+        if cfg.language != "auto" {
+            form = form.text("language", cfg.language.clone());
+        }
+        // Words to spell your way: Whisper treats the prompt as text that came just before.
+        let words = cfg.words.trim();
+        if !words.is_empty() {
+            form = form.text("prompt", format!("Vocabulary: {words}."));
+        }
+        let response = http()
+            .post("https://api.groq.com/openai/v1/audio/transcriptions")
+            .bearer_auth(key)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() { "Groq took too long to answer.".to_string() } else { "Could not reach Groq.".to_string() }
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            log::line(format!("speak: Groq answered {status}"));
+            return Err(match status.as_u16() {
+                401 | 403 => "Groq refused the key. Check it in the settings.".to_string(),
+                429 => "Groq says slow down (rate limit).".to_string(),
+                code => format!("Groq answered {code}."),
+            });
+        }
+        let body: serde_json::Value = response.json().await.map_err(|_| "Groq's answer made no sense.".to_string())?;
+        Ok(body.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string())
+    })
+}
+
+// ── The loop that ties it together ────────────────────────────────────────────
+
 fn run(app: AppHandle, rx: Receiver<Hold>) {
-    let mut loaded: Option<Loaded> = None;
     let mut capture: Option<Capture> = None;
     let mut started = Instant::now();
 
@@ -437,10 +525,9 @@ fn run(app: AppHandle, rx: Receiver<Hold>) {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(Hold::Quit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Hold::Start) => {
-                let (_, model_id, _) = config(&app);
-                if !whisper::is_downloaded(&model_id) {
-                    show(&app, "error", Some("Download a speech model in the settings first.".into()));
-                    hide_later(&app, 2600);
+                if secrets::get("groq-api-key").is_none() {
+                    show(&app, "error", Some("Add your Groq key in the settings.".into()));
+                    hide_later(&app, 2800);
                     continue;
                 }
                 match start_capture() {
@@ -453,15 +540,6 @@ fn run(app: AppHandle, rx: Receiver<Hold>) {
                         log::line(format!("speak: {err}"));
                         show(&app, "error", Some(err));
                         hide_later(&app, 2600);
-                        continue;
-                    }
-                }
-                // Loading the model while the first words are being recorded hides most of its delay.
-                if loaded.as_ref().map(|l| l.id != model_id).unwrap_or(true) {
-                    loaded = None;
-                    match whisper::Whisper::load(&model_id) {
-                        Ok(model) => loaded = Some(Loaded { id: model_id, model, last_used: Instant::now() }),
-                        Err(err) => log::line(format!("speak: could not load the model: {err}")),
                     }
                 }
             }
@@ -479,31 +557,27 @@ fn run(app: AppHandle, rx: Receiver<Hold>) {
                 phase(&app, "thinking", None);
                 let mut pcm = resample_16k(&raw, rate);
                 let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
-                // A quiet microphone makes Whisper guess: bring the loudest sound up to a normal level.
                 let peak = pcm.iter().fold(0f32, |m, v| m.max(v.abs()));
-                if peak > 0.0 && peak < 0.5 {
-                    let gain = (0.6 / peak).min(30.0);
-                    pcm.iter_mut().for_each(|v| *v *= gain);
-                }
                 log::line(format!("speak: heard {:.1}s, peak {:.3}, level {:.4}", seconds, peak, rms));
                 if rms < 0.002 {
                     phase(&app, "silent", Some("I didn't hear anything.".into()));
                     hide_later(&app, 1600);
                     continue;
                 }
-                let (_, model_id, language) = config(&app);
-                if loaded.as_ref().map(|l| l.id != model_id).unwrap_or(true) {
-                    loaded = whisper::Whisper::load(&model_id).ok().map(|model| Loaded { id: model_id.clone(), model, last_used: Instant::now() });
+                // A quiet microphone makes Whisper guess: bring the loudest sound up to a normal level.
+                if peak > 0.0 && peak < 0.5 {
+                    let gain = (0.6 / peak).min(30.0);
+                    pcm.iter_mut().for_each(|v| *v *= gain);
                 }
-                let Some(l) = loaded.as_mut() else {
-                    phase(&app, "error", Some("The speech model could not be loaded.".into()));
-                    hide_later(&app, 2600);
+                let Some(key) = secrets::get("groq-api-key") else {
+                    phase(&app, "error", Some("Add your Groq key in the settings.".into()));
+                    hide_later(&app, 2800);
                     continue;
                 };
+                let cfg = config(&app);
                 let t0 = Instant::now();
-                match l.model.transcribe(&pcm, &language) {
-                    Ok(text) if !text.trim().is_empty() => {
-                        l.last_used = Instant::now();
+                match transcribe(&key, &cfg, wav_bytes(&pcm)) {
+                    Ok(text) if !text.is_empty() => {
                         log::line(format!(
                             "speak: {:.1}s of audio → {} characters in {:.1}s",
                             seconds,
@@ -518,13 +592,12 @@ fn run(app: AppHandle, rx: Receiver<Hold>) {
                         phase(&app, "silent", Some("I didn't catch that.".into()));
                         hide_later(&app, 1600);
                     }
-                    Err(err) => {
-                        log::line(format!("speak: transcription failed: {err}"));
-                        phase(&app, "error", Some("Transcription failed.".into()));
-                        hide_later(&app, 2600);
+                    Err(message) => {
+                        log::line(format!("speak: transcription failed: {message}"));
+                        phase(&app, "error", Some(message));
+                        hide_later(&app, 3000);
                     }
                 }
-                let _ = started;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Some(c) = &capture {
@@ -537,12 +610,6 @@ fn run(app: AppHandle, rx: Receiver<Hold>) {
                     if started.elapsed() > Duration::from_secs(MAX_SECONDS as u64) {
                         // A held key that never comes back up: stop listening.
                         send(Hold::Stop);
-                    }
-                }
-                // The model is out of memory again after ten idle minutes.
-                if let Some(l) = &loaded {
-                    if capture.is_none() && l.last_used.elapsed() > Duration::from_secs(600) {
-                        loaded = None;
                     }
                 }
             }
@@ -625,8 +692,7 @@ pub fn stop() {
 
 /// The settings switch: the hook is only installed while Knowura Speak is on.
 pub fn apply(app: &AppHandle) {
-    let (on, _, _) = config(app);
-    if on {
+    if config(app).enabled {
         start(app);
     } else {
         stop();
@@ -636,34 +702,24 @@ pub fn apply(app: &AppHandle) {
     }
 }
 
-// ── Models, for the settings page ─────────────────────────────────────────────
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelRow {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub megabytes: u32,
-    pub multilingual: bool,
-    pub downloaded: bool,
-}
-
-pub fn model_rows() -> Vec<ModelRow> {
-    whisper::MODELS
-        .iter()
-        .map(|m| ModelRow {
-            id: m.id,
-            label: m.label,
-            megabytes: m.megabytes,
-            multilingual: m.multilingual,
-            downloaded: whisper::is_downloaded(m.id),
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wav_header_describes_16k_mono_pcm() {
+        let wav = wav_bytes(&[0.0, 0.5, -0.5, 1.0, -1.0]);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 10);
+        assert_eq!(wav.len(), 44 + 10);
+        assert_eq!(i16::from_le_bytes(wav[48..50].try_into().unwrap()), 16383);
+        assert_eq!(i16::from_le_bytes(wav[50..52].try_into().unwrap()), -16383);
+        assert_eq!(i16::from_le_bytes(wav[52..54].try_into().unwrap()), 32767);
+    }
 
     #[test]
     fn resampling_keeps_the_length_and_the_shape() {

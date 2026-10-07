@@ -68,11 +68,14 @@ pub struct Settings {
     /// Knowura Speak: hold Ctrl+Win, talk, and the words are typed where you were typing.
     #[serde(default)]
     pub speak_enabled: bool,
-    /// Which Whisper model (src/whisper.rs) and which language it should listen for.
+    /// Which Whisper model Groq runs, the language ("auto" lets it work that out), and words it
+    /// should spell the way you do (names, product names).
     #[serde(default = "speak_model_default")]
     pub speak_model: String,
     #[serde(default = "speak_language_default")]
     pub speak_language: String,
+    #[serde(default = "speak_words_default")]
+    pub speak_words: String,
     /// Weather: the city chosen in the settings (empty = none yet) and where it is.
     #[serde(default)]
     pub weather_place: String,
@@ -140,11 +143,15 @@ const OUTFITS: &[&str] = &[
 ];
 
 fn speak_model_default() -> String {
-    "base.en".to_string()
+    "whisper-large-v3-turbo".to_string()
 }
 
 fn speak_language_default() -> String {
-    "en".to_string()
+    "auto".to_string()
+}
+
+fn speak_words_default() -> String {
+    "Knowura, Coucou, Mochi".to_string()
 }
 
 fn auto_outfit() -> String {
@@ -175,13 +182,18 @@ impl Settings {
             self.mochi_outfit = auto_outfit();
         }
         // Only a model we know of (the name becomes a folder), and a plain language code.
-        const SPEAK_MODELS: &[&str] = &["tiny.en", "base.en", "small.en", "base", "small"];
+        const SPEAK_MODELS: &[&str] = &["whisper-large-v3-turbo", "whisper-large-v3"];
         if !SPEAK_MODELS.contains(&self.speak_model.as_str()) {
             self.speak_model = speak_model_default();
         }
-        if self.speak_language.len() > 3 || !self.speak_language.chars().all(|c| c.is_ascii_lowercase()) || self.speak_language.is_empty() {
+        let language = self.speak_language.as_str();
+        if language != "auto"
+            && (language.len() < 2 || language.len() > 3 || !language.chars().all(|c| c.is_ascii_lowercase()))
+        {
             self.speak_language = speak_language_default();
         }
+        // A short list of words, not a document: Whisper only reads a few hundred characters of it.
+        self.speak_words = self.speak_words.chars().filter(|c| !c.is_control()).take(300).collect();
         self.weather_place.truncate(80);
         self.weather_lat = self.weather_lat.clamp(-90.0, 90.0);
         self.weather_lon = self.weather_lon.clamp(-180.0, 180.0);
@@ -234,6 +246,7 @@ impl Default for Settings {
             speak_enabled: false,
             speak_model: speak_model_default(),
             speak_language: speak_language_default(),
+            speak_words: speak_words_default(),
             weather_place: String::new(),
             weather_lat: 0.0,
             weather_lon: 0.0,
