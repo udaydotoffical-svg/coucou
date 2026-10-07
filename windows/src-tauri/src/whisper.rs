@@ -360,4 +360,22 @@ mod tests {
         assert!(model_info("../evil").is_none());
         assert!(!is_downloaded("../evil"));
     }
+
+    /// Needs the base.en model on disk and a 16 kHz mono 16-bit wav in COUCOU_TEST_WAV:
+    /// `cargo test --release -- --ignored whisper_end_to_end --nocapture`.
+    #[test]
+    #[ignore]
+    fn whisper_end_to_end() {
+        let path = std::env::var("COUCOU_TEST_WAV").expect("COUCOU_TEST_WAV");
+        let bytes = std::fs::read(path).unwrap();
+        let pcm: Vec<f32> = bytes[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+        let t0 = std::time::Instant::now();
+        let mut w = Whisper::load("base.en").expect("model");
+        let loaded = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let text = w.transcribe(&pcm, "en").expect("transcribe");
+        println!("audio {:.1}s | load {:.2}s | transcribe {:.2}s
+=> {text}", pcm.len() as f32 / 16000.0, loaded.as_secs_f32(), t1.elapsed().as_secs_f32());
+        assert!(text.to_lowercase().contains("test"), "{text}");
+    }
 }
