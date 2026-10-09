@@ -1,74 +1,97 @@
-// The wardrobe: a grid of tiles, one per outfit. Hovering a tile dresses Mochi in it,
-// clicking keeps it. Opened by right-clicking Mochi (WardrobeView in IslandViewContent.swift).
+// Wardrobe view — port of WardrobeView (IslandViewContent.swift). Opened with a
+// right-click on Mochi or from the tray menu. Resting the pointer on a button
+// tries the outfit on Mochi; a click keeps it.
 
-import { Bridge } from "../core/bridge";
-import { State } from "../core/state";
-import { drawOutfitIcon, OUTFIT_LIST, outfitName, resolveOutfit, seasonalOutfit, type Outfit } from "../mochi/outfits";
 import { h } from "./dom";
+import { State } from "../core/state";
+import { drawWardrobeIcon } from "../mochi/outfits";
+import {
+  OUTFIT_KEYS, OUTFIT_SELECTIONS, WARDROBE_STRINGS, parseOutfit, resolveOutfit, seasonalOutfit,
+  wardrobeHeader, type Outfit, type OutfitSelection,
+} from "../mochi/wardrobe";
 import type { ViewActions, ViewHost } from "./views";
+import { language, tl } from "../i18n/i18n";
 
-const TILE = 30;
+const ICON = 28;
 
 export function buildWardrobe(actions: ViewActions): ViewHost {
-  const title = h("div", { class: "title", text: "Wardrobe" });
-  const sub = h("div", { class: "sub" });
-  const grid = h("div", { class: "wd-grid" });
-  const tiles = new Map<Outfit, HTMLElement>();
+  const note = h("span", { class: "wardrobe-note" });
+  const grid = h("div", { class: "wardrobe-grid" });
+  const el = h(
+    "div",
+    { class: "view wardrobe" },
+    h(
+      "div",
+      { class: "card" },
+      h(
+        "div",
+        { class: "stack wardrobe-stack" },
+        h("div", { class: "wardrobe-head" }, h("span", { class: "wardrobe-title", text: tl("Wardrobe") }), note),
+        grid,
+      ),
+    ),
+  );
 
-  const dpr = () => Math.max(1, window.devicePixelRatio || 1);
+  let hovered: OutfitSelection | null = null;
+  let drawnSeason: Outfit | null = null;
+  let drawnLanguage = language();
+  const items = new Map<OutfitSelection, { button: HTMLButtonElement; canvas: HTMLCanvasElement }>();
 
-  for (const o of OUTFIT_LIST) {
-    const cv = document.createElement("canvas");
-    const px = Math.round(TILE * dpr());
-    cv.width = px;
-    cv.height = px;
-    cv.style.width = `${TILE - 8}px`;
-    cv.style.height = `${TILE - 8}px`;
-    const x = cv.getContext("2d");
-    if (x) {
-      x.scale(px / TILE, px / TILE);
-      // "Auto" shows the outfit of the day, or a bare Mochi when there is none.
-      drawOutfitIcon(x, TILE, o.id === "auto" ? seasonalOutfit() : o.id);
-    }
-    const tile = h("button", { class: "wd-tile", title: o.name }, cv);
-    if (o.id === "auto") tile.append(h("span", { class: "wd-auto", text: "AUTO" }));
-    tile.addEventListener("mouseenter", () => {
-      State.wardrobePreview = resolveOutfit(o.id);
-      State.notify();
+  const updateNote = () => {
+    note.textContent = wardrobeHeader(hovered, parseOutfit(State.settings.mochiOutfit), new Date());
+  };
+
+  for (const sel of OUTFIT_SELECTIONS) {
+    const canvas = h("canvas");
+    const button = h(
+      "button",
+      { class: "wardrobe-item", title: tl(OUTFIT_KEYS[sel]), "aria-label": tl(OUTFIT_KEYS[sel]) },
+      canvas,
+    );
+    button.addEventListener("mouseenter", () => {
+      hovered = sel;
+      actions.previewOutfit(resolveOutfit(sel, new Date()));
+      updateNote();
     });
-    tile.addEventListener("mouseleave", () => {
-      State.wardrobePreview = null;
-      State.notify();
+    button.addEventListener("mouseleave", () => {
+      if (hovered !== sel) return;
+      hovered = null;
+      actions.previewOutfit(null);
+      updateNote();
     });
-    tile.addEventListener("click", () => {
-      if (State.settings.mochiOutfit === o.id) return;
-      actions.blip();
-      State.settings.mochiOutfit = o.id;
-      void Bridge.saveSettings(State.settings);
-      State.notify();
-    });
-    tiles.set(o.id, tile);
-    grid.append(tile);
+    button.addEventListener("click", () => actions.chooseOutfit(sel));
+    items.set(sel, { button, canvas });
+    grid.append(button);
   }
 
-  const body = h(
-    "div",
-    { class: "stack", style: "padding:0 18px 0 118px;gap:8px" },
-    h("div", { class: "wd-head" }, title, sub),
-    grid,
-  );
-  const el = h("div", { class: "view" }, h("div", { class: "card" }, body));
+  /** Icons are drawn once; only "auto" changes, with the season and its badge's language. */
+  const drawIcons = () => {
+    const season = seasonalOutfit(new Date());
+    if (season === drawnSeason && drawnLanguage === language()) return;
+    const first = drawnSeason == null;
+    drawnSeason = season;
+    drawnLanguage = language();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    for (const [sel, { canvas }] of items) {
+      if (!first && sel !== "auto") continue;
+      canvas.width = Math.round(ICON * dpr);
+      canvas.height = Math.round(ICON * dpr);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawWardrobeIcon(ctx, ICON, sel, season, WARDROBE_STRINGS.autoBadge);
+    }
+  };
 
   return {
     el,
     sync() {
-      const sel = (State.settings.mochiOutfit || "auto") as Outfit;
-      for (const [id, tile] of tiles) tile.classList.toggle("on", id === sel);
-      const shown = State.wardrobePreview;
-      const seasonal = seasonalOutfit();
-      if (shown != null) sub.textContent = outfitName(shown);
-      else if (sel === "auto") sub.textContent = `Auto · ${outfitName(seasonal)}`;
-      else sub.textContent = outfitName(sel);
+      drawIcons();
+      // The island drops the preview when the view closes: so does the hover.
+      if (State.wardrobePreview == null) hovered = null;
+      const current = parseOutfit(State.settings.mochiOutfit);
+      for (const [sel, { button }] of items) button.classList.toggle("on", sel === current);
+      updateNote();
     },
   };
 }

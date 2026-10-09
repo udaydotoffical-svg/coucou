@@ -2,30 +2,37 @@
 // Mirrors IslandRootView.swift + IslandWindowController.swift.
 
 import { Tracked, Spring, clamp } from "../core/anim";
-import { Bridge, IS_TAURI, onDragDrop, onEvent } from "../core/bridge";
+import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, KNOWURA_RADIUS, NOTCH_H, NOTCH_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
   islandSize, panelSize,
-  type IslandMode, type IslandViewName,
+  QUESTION_PICKER_H,
+  type BotEmoteName, type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
 import { dominantColor, DEFAULT_COLOR } from "../core/color";
 import { degrees, weatherIcon, weatherLabel } from "../views/weather";
-import { resolveOutfit, type Outfit } from "../mochi/outfits";
-import type { MochiSync } from "../desktop/main";
 import { State, type MusicInfo } from "../core/state";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
+import { SeasonCache, parseOutfit } from "../mochi/wardrobe";
 import { UploadCanvas } from "../upload/canvas";
 import { USC, UploadSeq } from "../upload/sequence";
+import { closePlanCard, openPlanColor, planCardOpen } from "../views/usage";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
 import { h, svg } from "../views/dom";
 import { ICONS } from "../views/icons";
 import { IslandStateMachine } from "./fsm";
+import { refreshHookPills } from "./integrations";
+import { DesktopLink } from "./desktop";
+import { DRAG_THRESHOLD } from "../mochi/desktop-logic";
 
 const BOT_OVERHANG = 40;
+const CLAUDE_DESKTOP_ID = "agent_claude-desktop";
+/** Extra canvas on each side of Mochi, for the witch hat's brim and the Santa hat's tip. */
+const BOT_SIDE = 24;
 /** Same margin as the Rust hit test (src-tauri/src/island.rs). */
 const HIT_MARGIN = 14;
 
@@ -37,8 +44,20 @@ const PRE_PROGRESS = USC.T_PROG_START - USC.T_DROP;
 
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
 
+/** Music is playing on this PC (Windows' media session). */
+function musicPlaying(): boolean {
+  return !!State.music?.active && !!State.music.playing;
+}
+
+/** The dance only happens when he has nothing else to show (the Mac's rule). */
+function danceableState(s: string): boolean {
+  return s === "idle" || s === "working" || s === "thinking" || s === "searching" || s === "finished";
+}
+
 export class Island {
   readonly fsm = new IslandStateMachine();
+  /** Mochi on the desktop: his life cycle and the drag out of the island. */
+  readonly desktop: DesktopLink;
 
   private root: HTMLElement;
   private islandEl!: HTMLElement;
@@ -71,6 +90,8 @@ export class Island {
 
   private engine = new BotEngine();
   private greeting = new Greeting();
+  private greetingShown = false;
+  private seasons = new SeasonCache();
 
   private running = false;
   private lastFrame = 0;
@@ -83,7 +104,6 @@ export class Island {
   private wasInIsland = false;
   /** Last shape handed to Rust for the click-through test. */
   private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
-  private homeCollapseAt: number | null = null;
 
   // Bot hover → love (IslandWindowController.botHoverIn)
   private botHovering = false;
@@ -95,67 +115,56 @@ export class Island {
   private prevViewBeforeConfused: IslandViewName = "overview";
   private lastSyncedView: IslandViewName | null = null;
 
+  /** The launch greeting ended, or the island came out of hidden — two of the
+   *  moments the Monday recap may open (see src/recap/recap.ts). */
+  onGreetingDone: (() => void) | null = null;
+  onWake: (() => void) | null = null;
+
+  /** Where a press on Mochi started: moving past DRAG_THRESHOLD drags him out. */
+  private botPress: { x: number; y: number } | null = null;
+
   /** Drop sequence bookkeeping: last tick played, and whether the ✓ has fired. */
   private uploadTens = 0;
   private uploadDone = false;
 
   constructor(root: HTMLElement) {
     this.root = root;
+    this.desktop = new DesktopLink({
+      reveal: () => this.reveal(),
+      wardrobeFromDesktop: () => this.wardrobeFromDesktop(),
+      dizzyFromDesktop: () => this.handleDizzy(),
+    });
     this.build();
     this.wireFsm();
     this.wireInput();
     this.engine.onDizzy = () => this.handleDizzy();
-    this.greeting.onComplete = () => this.fsm.greetComplete();
+    this.greeting.onComplete = () => {
+      this.fsm.greetComplete();
+      this.onGreetingDone?.();
+    };
     State.subscribe(() => {
       this.dirty = true;
       this.ensureRunning();
-      this.pushDesktopMochi();
     });
-    // The desktop Mochi's page asks for the current look when it loads, and opens the wardrobe here.
-    void onEvent("mochi-ready", () => this.pushDesktopMochi(true));
-    void onEvent("mochi-wardrobe", () => this.toggleWardrobeFromDesktop());
   }
 
-  // ── Mochi on the desktop ────────────────────────────────────────────────────
-
-  private botPress: { x: number; y: number } | null = null;
-  private lastDesktopSync = "";
-  private lastAlert = false;
+  /** The request has its answer: the card goes and the session carries on. */
+  private closeApproval() {
+    State.endApproval();
+    this.fsm.pinned = false;
+    this.setView(State.defaultView());
+  }
 
   /**
-   * Tells the desktop Mochi what he should look like (the same state, outfit and headphones as the
-   * island's), and Rust whether something is waiting for an answer, so he goes back to the notch.
+   * Folds a card that is waiting for an answer down to the compact island,
+   * without answering it (Mac #290). Nothing is decided: the request keeps
+   * waiting, the island stays on screen, and opening it shows the card again.
    */
-  private pushDesktopMochi(force = false) {
-    if (!IS_TAURI) return;
-    const alert = !!State.pendingApproval || (State.mode === "expanded" && State.view === "question");
-    if (alert !== this.lastAlert) {
-      this.lastAlert = alert;
-      void Bridge.desktopMochiAlert(alert);
-    }
-    if (!State.settings.desktopMochi && !force) return;
-    const sync: MochiSync = {
-      state: State.effectiveState,
-      outfit: resolveOutfit((State.settings.mochiOutfit || "auto") as Outfit),
-      headphones: State.settings.mochiHeadphones && !!State.music?.active && !!State.music.playing,
-      accent: (State.musicColor as [number, number, number] | null) ?? null,
-      soundEnabled: State.settings.soundEnabled,
-      volume: State.settings.soundVolume,
-    };
-    const key = JSON.stringify(sync);
-    if (key === this.lastDesktopSync && !force) return;
-    this.lastDesktopSync = key;
-    void Bridge.broadcast("mochi-sync", sync);
-  }
-
-  /** Right-click on the desktop Mochi: the wardrobe opens (or closes) on the island. */
-  private toggleWardrobeFromDesktop() {
-    if (State.mode === "expanded" && State.view === "wardrobe") {
-      State.wardrobePreview = null;
-      this.setView(State.defaultView());
-    } else {
-      this.alert("wardrobe");
-    }
+  foldApproval() {
+    if (!State.pendingApproval || State.mode !== "expanded") return;
+    State.isPinned = true;
+    this.fsm.pinned = true;
+    this.fsm.forcePetit();
   }
 
   // ── DOM ─────────────────────────────────────────────────────────────────────
@@ -163,14 +172,22 @@ export class Island {
   private build() {
     const actions: ViewActions = {
       setView: (v) => this.setView(v),
+      cancelDrop: () => this.discardDrop(),
       collapse: () => this.collapse(),
+      foldApproval: () => this.foldApproval(),
       setFocus: (id) => {
         State.setFocus(id);
         Sound.play("blip");
+        // A pill with a waiting request opens on its card: going back to it
+        // after looking at another pill brings the card up again.
+        const req = State.pendingApproval;
+        if (req?.pillId === id) this.setView(req.questions ? "question" : "approval");
       },
       openTerminal: () => {
-        const cwd = State.focusTask?.sessionCwd ?? null;
-        void Bridge.openInVSCode(cwd);
+        const task = State.focusTask;
+        // Sessions from the Claude desktop app live there, not in a terminal.
+        if (task?.id === CLAUDE_DESKTOP_ID) void Bridge.openClaudeDesktop();
+        else void Bridge.openSession(task?.sessionId ?? null, task?.sessionCwd ?? null);
       },
       // The ↗ button — same targets as openAgentTarget() on macOS.
       openTarget: () => {
@@ -179,13 +196,15 @@ export class Island {
         const urls: Record<string, string> = {
           integration_resend: "https://resend.com/emails",
           integration_vercel: "https://vercel.com/dashboard",
-          integration_github: "https://github.com",
+          integration_github: "https://github.com/pulls",
           integration_stripe: "https://dashboard.stripe.com/payments",
           integration_notion: "https://notion.so",
           integration_calcom: "https://app.cal.com/bookings",
         };
-        if (task.id === "integration_claude") void Bridge.openInVSCode(task.sessionCwd ?? null);
-        else if (task.id === "integration_n8n") void Bridge.openN8n();
+        if (task.id === CLAUDE_DESKTOP_ID) void Bridge.openClaudeDesktop();
+        else if (task.id === "integration_claude" || task.sessionId) {
+          void Bridge.openSession(task.sessionId ?? null, task.sessionCwd ?? null);
+        } else if (task.id === "integration_n8n") void Bridge.openN8n();
         else if (urls[task.id]) void Bridge.openUrl(urls[task.id]);
       },
       openUrl: (url) => {
@@ -197,12 +216,21 @@ export class Island {
         if (!req) return;
         Sound.play(d === "deny" ? "blip" : "approve");
         void Bridge.approvalDecision(req.requestId, d);
-        State.pendingApproval = null;
-        State.isPinned = false;
-        this.fsm.pinned = false;
-        State.updateTask("integration_claude", "working");
-        State.setPillBadge("integration_claude", null);
-        this.setView(State.defaultView());
+        this.closeApproval();
+      },
+      answer: (answers) => {
+        const req = State.pendingApproval;
+        if (!req) return;
+        Sound.play("approve");
+        void Bridge.approvalAnswer(req.requestId, answers);
+        this.closeApproval();
+      },
+      answerInTerminal: () => {
+        const req = State.pendingApproval;
+        if (!req) return;
+        Sound.play("blip");
+        void Bridge.approvalDecline(req.requestId);
+        this.closeApproval();
       },
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
@@ -225,6 +253,18 @@ export class Island {
       openSettingsWindow: () => void Bridge.openSettingsWindow(),
       blip: () => Sound.play("blip"),
       musicControl: (action) => void Bridge.musicControl(action),
+      chooseOutfit: (selection) => {
+        if (parseOutfit(State.settings.mochiOutfit) === selection) return;
+        State.settings.mochiOutfit = selection;
+        void Bridge.saveSettings(State.settings);
+        Sound.play("pop");
+        this.engine.triggerEmote("proud");
+        State.notify();
+      },
+      previewOutfit: (outfit) => {
+        State.wardrobePreview = outfit;
+        State.notify();
+      },
     };
 
     this.wakeStrip = h("div", { id: "wake-strip" });
@@ -254,7 +294,7 @@ export class Island {
           : null;
         this.setView("prompt");
       },
-      cancel: () => this.setView(State.defaultView()),
+      cancel: () => this.discardDrop(),
     });
 
     this.clipEl = h(
@@ -301,6 +341,8 @@ export class Island {
     this.fsm.hoverCloseGuard = () =>
       State.view !== "prompt" && !State.fileDragOver && !UploadSeq.isActive;
     this.fsm.onTransition = (from, to) => {
+      // The greeting is over, however it ended: back to his desktop spot.
+      if (from === "coucou" && to !== "coucou") this.desktop.launch();
       switch (to) {
         case "hidden":
           this.setMode("hidden");
@@ -313,9 +355,11 @@ export class Island {
           if (!this.wasInIsland) this.fsm.mouseLeft(false);
           break;
         case "home":
-          if (from === "coucou") this.greeting.stop();
           this.expand(State.defaultView());
           if (!this.wasInIsland) this.fsm.mouseLeft(false);
+          // Hooks may have been installed in a terminal since: the idle cards
+          // say so on the next open, without polling while the island is shut.
+          void refreshHookPills();
           break;
         case "coucou":
           this.expand("greeting");
@@ -323,6 +367,7 @@ export class Island {
           break;
       }
       State.notify();
+      if (from === "hidden") this.onWake?.();
     };
   }
 
@@ -336,14 +381,15 @@ export class Island {
     const prev = State.mode;
     if (mode === prev) return;
     State.mode = mode;
-    if (mode !== "expanded") State.activeDiff = null;
     if (mode === "expanded") Sound.play("open");
     if (prev === "expanded") {
       Sound.play("close");
-      State.isPinned = false;
+      // A folded card is still waiting: it keeps the island pinned.
+      if (!State.pendingApproval) State.isPinned = false;
       void Bridge.focusWindow(false);
     }
     if (mode !== "expanded") {
+      closePlanCard();
       this.engine.resetMorph();
       // Nothing can be seen of the sequence once the island is shut, and leaving
       // it running would keep the frame loop awake — the island must cost
@@ -396,7 +442,6 @@ export class Island {
     this.fsm.pinned = pinned;
     if (pinned) {
       this.fsm.cancelTimers();
-      this.homeCollapseAt = null;
     } else if (this.fsm.state === "home" && !this.wasInIsland && !State.knowuraOpen) {
       this.fsm.mouseLeft(false);
     }
@@ -455,7 +500,6 @@ export class Island {
     State.knowuraOpen = true;
     this.fsm.locked = true;
     this.fsm.cancelTimers();
-    this.homeCollapseAt = null;
     State.isPinned = false;
     this.fsm.pinned = false;
     this.alert("knowura");
@@ -473,11 +517,11 @@ export class Island {
   expand(view: IslandViewName) {
     if (this.redirectChat(view)) return;
     this.stopSequenceIfLeaving(view);
+    if (view !== "overview") closePlanCard();
     State.view = view;
     if (State.mode !== "expanded") this.setMode("expanded");
     else this.animateGeometry(false);
     State.lastActivity = performance.now();
-    this.homeCollapseAt = null;
     this.syncPin();
     State.notify();
   }
@@ -485,6 +529,7 @@ export class Island {
   setView(view: IslandViewName) {
     if (this.redirectChat(view)) return;
     this.stopSequenceIfLeaving(view);
+    if (view !== "overview") closePlanCard();
     if (State.mode !== "expanded") {
       this.fsm.forceHome();
       State.view = view;
@@ -493,7 +538,6 @@ export class Island {
       return;
     }
     const grew = VIEW_LAYOUTS[view].height >= VIEW_LAYOUTS[State.view].height;
-    if (view !== State.view) State.activeDiff = null;
     State.view = view;
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
@@ -502,6 +546,11 @@ export class Island {
   }
 
   collapse() {
+    // A waiting card is only ever folded, never dropped by a close.
+    if (State.pendingApproval) {
+      this.foldApproval();
+      return;
+    }
     State.isPinned = false;
     this.fsm.pinned = false;
     // Drive the state machine rather than the mode: setting the mode behind its
@@ -521,9 +570,68 @@ export class Island {
     this.fsm.reveal();
   }
 
+  /** Right-click on Mochi: wardrobe open ↔ back to the usual view. */
+  toggleWardrobe() {
+    if (State.paused || State.mode === "hidden") return;
+    // The greeting and the drop sequence draw a Mochi of their own.
+    if (State.mode === "expanded" && (State.view === "greeting" || this.uploadActive)) return;
+    if (State.mode === "expanded" && State.view === "wardrobe") this.setView(State.defaultView());
+    else this.setView("wardrobe");
+  }
+
+  /**
+   * Right-click on the desktop Mochi (macOS openWardrobeFromDesktop): opens the
+   * wardrobe from any state, or goes back if it is already open.
+   */
+  wardrobeFromDesktop() {
+    this.wardrobeAnywhere();
+  }
+
+  /**
+   * The wardrobe from any state — compact or hidden island included — or back
+   * to the usual view if it is already open. The desktop Mochi's right-click
+   * and the wardrobe shortcut (`open-wardrobe`) both land here.
+   */
+  wardrobeAnywhere() {
+    if (State.mode === "expanded" && State.view === "wardrobe") {
+      this.setView(State.defaultView());
+      return;
+    }
+    if (State.paused) return;
+    this.alert("wardrobe");
+  }
+
   /** An alert stopped waiting for an answer: let the island auto-close again. */
   dropPin() {
     this.fsm.pinned = false;
+    // The countdown the pin held back starts now, if the mouse is elsewhere.
+    if (!this.wasInIsland) this.fsm.mouseLeft();
+  }
+
+  // ── Keyboard shortcuts (island/shortcuts.ts) ────────────────────────────────
+
+  emote(name: BotEmoteName) {
+    this.engine.triggerEmote(name);
+    this.ensureRunning();
+  }
+
+  /** Ctrl+P: keep the open island from folding away, or let it fold again. */
+  setPinned(on: boolean) {
+    State.isPinned = on;
+    this.fsm.pinned = on;
+    if (on) {
+      // The countdown bar reads the state machine's deadline, cleared with it.
+      this.fsm.cancelTimers();
+    } else if (!this.wasInIsland && this.fsm.state === "home") {
+      this.fsm.mouseLeft();
+    }
+    State.notify();
+  }
+
+  /** The island takes the keyboard, so its own shortcuts work (Mac: makeKey).
+   *  It gives it back when it closes, or when the chat is left. */
+  takeKeyboard() {
+    void Bridge.focusWindow(true);
   }
 
   // ── File drop ───────────────────────────────────────────────────────────────
@@ -593,11 +701,14 @@ export class Island {
 
     void Bridge.ingestFile(path)
       .then((file) => {
+        // Cancelled (or replaced by another drop) while the copy was running.
+        if (State.droppedFile?.path !== path) return;
         State.droppedFile = { name: file.name, path: file.path };
         State.promptContext = { kind: "file", name: file.name, path: file.path };
         State.notify();
       })
       .catch((err) => {
+        if (State.droppedFile?.path !== path) return;
         UploadSeq.deactivate();
         State.noteMessage = String(err).replace(/^Error:\s*/, "");
         this.engine.animateMorph(0);
@@ -605,6 +716,13 @@ export class Island {
         Sound.play("error");
         window.setTimeout(() => this.setView(State.defaultView()), 2400);
       });
+  }
+
+  /** "Cancel" on the dropped file: forget it, so the chat does not pick it up. */
+  private discardDrop() {
+    State.droppedFile = null;
+    State.promptContext = null;
+    this.setView(State.defaultView());
   }
 
   /**
@@ -637,7 +755,10 @@ export class Island {
   // ── Geometry ────────────────────────────────────────────────────────────────
 
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, State.settings, !!State.music?.active);
+    let { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, State.settings, !!State.music?.active);
+    if (State.mode === "expanded" && State.view === "question" && State.pendingApproval?.questions) {
+      h = QUESTION_PICKER_H;
+    }
     const r =
       State.mode === "expanded"
         ? State.view === "knowura" ? KNOWURA_RADIUS : EXPANDED_CORNER
@@ -756,6 +877,16 @@ export class Island {
       Sound.resume();
       State.lastActivity = performance.now();
       if (State.knowuraOpen) return;
+      // A press on Mochi may become a drag out to the desktop.
+      if (e.button === 0 && this.isBotHit(e.clientX, e.clientY)) {
+        this.botPress = { x: e.clientX, y: e.clientY };
+      }
+      // Right-click on Mochi opens the wardrobe, and closes it again.
+      if (e.button === 2 && this.isBotHit(e.clientX, e.clientY)) {
+        this.cancelBotHover();
+        this.toggleWardrobe();
+        return;
+      }
       if (State.mode !== "expanded") {
         this.fsm.click();
         return;
@@ -763,42 +894,46 @@ export class Island {
       if (e.button === 0 && this.isBotHit(e.clientX, e.clientY)) {
         this.cancelBotHover();
         this.engine.slap();
-        this.botPress = { x: e.clientX, y: e.clientY };
       }
     });
 
-    // Pulling Mochi out of the island by his body puts him on the desktop, under the cursor.
-    window.addEventListener("mousemove", (e) => {
-      if (!this.botPress) return;
-      if (e.buttons !== 1) { this.botPress = null; return; }
-      if (Math.hypot(e.clientX - this.botPress.x, e.clientY - this.botPress.y) > 16) {
-        this.botPress = null;
-        void Bridge.desktopMochiPickUp();
-      }
-    });
-    window.addEventListener("mouseup", () => { this.botPress = null; });
-
-    // Right-click on Mochi opens the wardrobe (and closes it again).
+    // No browser menu over Mochi: his right-click is the wardrobe. Everywhere
+    // else (the chat field) the webview keeps its own menu.
     this.islandEl.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      if (State.knowuraOpen) return;
-      Sound.resume();
-      State.lastActivity = performance.now();
-      if (State.mode !== "expanded") {
-        this.openWardrobe();
+      if (this.isBotHit(e.clientX, e.clientY)) e.preventDefault();
+    });
+
+    // Dragging Mochi out of the island puts him on the desktop.
+    window.addEventListener("mousemove", (e) => {
+      if (this.desktop.carrying) {
+        this.desktop.carry(e.clientX, e.clientY);
         return;
       }
-      if (State.view === "wardrobe") {
-        State.wardrobePreview = null;
-        this.setView(State.defaultView());
-      } else if (this.isBotHit(e.clientX, e.clientY)) {
-        Sound.play("blip");
-        this.setView("wardrobe");
+      const press = this.botPress;
+      if (!press) return;
+      if (!(e.buttons & 1)) {
+        this.botPress = null;
+        return;
       }
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) <= DRAG_THRESHOLD) return;
+      this.botPress = null;
+      if (!this.canDragOut()) return;
+      this.cancelBotHover();
+      this.desktop.pickUp(e.clientX, e.clientY);
+    });
+    window.addEventListener("mouseup", (e) => {
+      this.botPress = null;
+      if (this.desktop.carrying) this.desktop.carryEnd(e.clientX, e.clientY);
     });
 
+    // Only keys typed into the island itself land here, never Escape typed in
+    // a terminal — so it may fold a waiting card away, as Escape in the notch
+    // does on macOS.
     window.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && State.mode === "expanded" && !State.isPinned && !State.knowuraOpen) this.collapse();
+      if (e.key === "Escape" && State.mode === "expanded" && !State.knowuraOpen) {
+        if (State.pendingApproval) this.foldApproval();
+        else if (!State.isPinned) this.collapse();
+      }
       State.lastActivity = performance.now();
     });
 
@@ -822,8 +957,24 @@ export class Island {
     });
   }
 
+  /**
+   * Pointer on/off the island as the compositor sees it (Linux only). Null
+   * until the first report, so a platform that never sends it is not gated.
+   */
+  private pointerInside: boolean | null = null;
+
+  setPointerInside(inside: boolean) {
+    this.pointerInside = inside;
+  }
+
   /** Cursor in window-logical coordinates. */
   onCursor(x: number, y: number) {
+    // WebKitGTK can deliver a mousemove after the pointer has left the layer
+    // surface; trusting it re-enters the island and the auto-close never runs.
+    if (this.pointerInside === false) {
+      x = -10_000;
+      y = -10_000;
+    }
     State.mouse = { x, y };
     const rect = this.islandRect();
     State.mouseInIsland = { x: x - rect.x, y: y - rect.y };
@@ -841,13 +992,9 @@ export class Island {
     if (inIsland && !this.wasInIsland) {
       if (this.fsm.state === "coucou") this.greeting.hover();
       this.fsm.mouseEntered();
-      this.homeCollapseAt = null;
     }
     if (!inIsland && this.wasInIsland) {
       this.fsm.mouseLeft();
-      if (this.fsm.state === "home" && !State.isPinned && State.settings.autoHide && !State.knowuraOpen && !this.fsm.pinned) {
-        this.homeCollapseAt = performance.now() + State.settings.autoCloseInterval * 1000;
-      }
     }
     this.wasInIsland = inIsland;
 
@@ -867,7 +1014,15 @@ export class Island {
     this.ensureRunning();
   }
 
+  /** The greeting and the drop sequence draw a Mochi of their own: not that one. */
+  private canDragOut(): boolean {
+    if (State.mode === "hidden" || !this.desktop.canPickUp()) return false;
+    return !(State.mode === "expanded" && (State.view === "greeting" || this.uploadActive));
+  }
+
   private isBotHit(x: number, y: number): boolean {
+    // Out on the desktop, the island's Mochi is invisible: nothing to hit.
+    if (State.mochiOnDesktop) return false;
     const rect = this.islandRect();
     const cx = rect.x + this.botCx.value;
     const cy = rect.y + this.botCy.value;
@@ -903,7 +1058,7 @@ export class Island {
   }
 
   /** Three slaps → dizzy + confused view for 3.3 s, then back. */
-  private handleDizzy() {
+  handleDizzy() {
     this.prevViewBeforeConfused = State.view;
     State.stateOverride = "dizzy";
     this.engine.setState("dizzy");
@@ -987,7 +1142,8 @@ export class Island {
     this.viewsEl.classList.toggle("hidden-by-upload", uploadActive);
 
     tickMiniBots(dt);
-    this.views.get(State.view)?.tick?.(nowMs);
+    // A ticker scroll that loses its frames freezes mid-way, rows overlapping.
+    const viewAnimating = this.views.get(State.view)?.tick?.(nowMs) === true;
     if (UploadSeq.isActive) this.stepSequence();
     this.updateCountdown(nowMs);
 
@@ -1003,7 +1159,7 @@ export class Island {
       ? settling
       : settling ||
         !this.botCx.settled || !this.botCy.settled || !this.botSize.settled ||
-        greetingActive || this.engine.busy || UploadSeq.isActive;
+        greetingActive || this.engine.busy || UploadSeq.isActive || viewAnimating;
 
     if (busy) {
       requestAnimationFrame(this.frame);
@@ -1023,11 +1179,13 @@ export class Island {
     this.botSize.target = p.diameter / 0.6;
 
     const greetingActive = State.mode === "expanded" && State.view === "greeting";
-    // The drop canvas draws its own Mochi; two of them would overlap.
-    const visible = p.opacity > 0 && !greetingActive && !this.uploadActive && State.view !== "knowura";
+    // The drop canvas draws its own Mochi; two of them would overlap. Out on the
+    // desktop, he isn't here at all.
+    const away = State.mochiOnDesktop;
+    const visible = p.opacity > 0 && !greetingActive && !this.uploadActive && !away && State.view !== "knowura";
     this.botCanvas.style.opacity = visible ? "1" : "0";
 
-    if (State.mode === "expanded" && State.view !== "uploading" && State.view !== "knowura" && !greetingActive && !this.uploadActive) {
+    if (State.mode === "expanded" && State.view !== "uploading" && State.view !== "knowura" && !greetingActive && !this.uploadActive && !away) {
       const d = p.diameter;
       const color = botGlowColor(State.effectiveState);
       this.botGlow.style.display = "block";
@@ -1046,22 +1204,28 @@ export class Island {
     const size = this.botSize.value;
     const w = Math.max(1, Math.round(size));
     const hCss = w + BOT_OVERHANG;
+    const wCss = w + BOT_SIDE * 2;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     if (this.canvasPx !== w) {
       this.canvasPx = w;
-      this.botCanvas.width = Math.round(w * dpr);
+      this.botCanvas.width = Math.round(wCss * dpr);
       this.botCanvas.height = Math.round(hCss * dpr);
-      this.botCanvas.style.width = `${w}px`;
+      this.botCanvas.style.width = `${wCss}px`;
       this.botCanvas.style.height = `${hCss}px`;
     }
-    this.botCanvas.style.left = `${this.botCx.value - w / 2}px`;
+    this.botCanvas.style.left = `${this.botCx.value - wCss / 2}px`;
     this.botCanvas.style.top = `${this.botCy.value - BOT_OVERHANG / 2 - hCss / 2}px`;
 
     const ctx = this.botCanvas.getContext("2d");
     if (!ctx) return;
 
     const focus = State.focusTask;
-    this.engine.bodyColor = focus?.isIntegration ? hexToRGB(focus.color) : null;
+    // While a plan card is open Mochi wears the plan's colour, like its pill.
+    this.engine.bodyColor = planCardOpen()
+      ? hexToRGB(openPlanColor())
+      : focus?.isIntegration
+        ? hexToRGB(focus.color)
+        : null;
     this.engine.particleOverhang = BOT_OVERHANG;
     this.engine.lookX = this.lookX();
     this.engine.lookY = this.lookY();
@@ -1078,30 +1242,21 @@ export class Island {
     this.engine.headphones =
       State.settings.mochiHeadphones && !!State.music?.active && !!State.music.playing;
     this.engine.phoneAccent = State.musicColor;
-    this.engine.setOutfit(this.outfitNow());
+    this.engine.dancing = State.settings.mochiDances && musicPlaying() && danceableState(State.effectiveState);
+    // Only the main Mochi is dressed — the one of the main tool's pill (Settings →
+    // Active pills): a focused integration pill shows its own colours, unless
+    // the wardrobe is open (BotCanvasView.showOutfit, macOS).
+    // In the wardrobe the hovered outfit swaps in at once, without the drop-in.
+    const inWardrobe = State.mode === "expanded" && State.view === "wardrobe";
+    const mainFocused = State.focusId == null || State.focusId === State.mainPillId;
+    const showOutfit = mainFocused || State.mode !== "expanded" || inWardrobe;
+    const outfit = State.wardrobePreview ?? this.seasons.get(parseOutfit(State.settings.mochiOutfit));
+    this.engine.setOutfit(showOutfit ? outfit : "none", !inWardrobe);
+
     this.engine.update(dt);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, hCss);
+    ctx.setTransform(dpr, 0, 0, dpr, BOT_SIDE * dpr, 0);
+    ctx.clearRect(-BOT_SIDE, 0, wCss, hCss);
     this.engine.draw(ctx, w, hCss);
-  }
-
-  /** The outfit Mochi should wear right now: the previewed one, else the chosen one (by season if "auto"). */
-  private outfitNow(): Outfit {
-    if (State.view === "wardrobe" && State.wardrobePreview != null) return State.wardrobePreview;
-    const chosen = resolveOutfit((State.settings.mochiOutfit || "auto") as Outfit);
-    // Only the big Mochi wears it, and only while he is the one in front: when the focus is on another
-    // agent in the open island he is bare. Closed, and in the wardrobe, he always wears it.
-    if (State.mode === "expanded" && State.view !== "wardrobe") {
-      const mainId = State.settings.mainAvatar || "integration_claude";
-      if (State.focusId && State.focusId !== mainId) return "none";
-    }
-    return chosen;
-  }
-
-  /** Right-click on the closed island: open it onto the wardrobe. */
-  private openWardrobe() {
-    Sound.play("blip");
-    this.alert("wardrobe");
   }
 
   /** BotCanvasView.lookX / lookY — tanh of the distance to the bot. */
@@ -1116,13 +1271,16 @@ export class Island {
   }
 
   private updateCountdown(nowMs: number) {
-    if (State.mode !== "expanded" || State.isPinned || this.homeCollapseAt == null) {
+    // The state machine's own deadline, so the bar follows an auto-close delay
+    // edited while the countdown runs.
+    const dueAt = this.fsm.homeCollapseDueAt;
+    if (State.mode !== "expanded" || State.isPinned || dueAt == null) {
       this.countdown.style.width = "0px";
       return;
     }
-    const autoClose = State.settings.autoCloseInterval;
+    const autoClose = this.fsm.homeToPetitDelay;
     const windowS = Math.min(10, autoClose * 0.6);
-    const remaining = (this.homeCollapseAt - nowMs) / 1000;
+    const remaining = (dueAt - nowMs) / 1000;
     this.countdown.style.width =
       remaining < windowS ? `${Math.max(0, clamp(remaining / windowS, 0, 1) * 160)}px` : "0px";
   }
@@ -1133,11 +1291,20 @@ export class Island {
     const expanded = State.mode === "expanded";
     const greetingActive = expanded && State.view === "greeting";
 
-    const mochiContent = expanded && !greetingActive && State.view !== "knowura";
-    this.contentEl.style.opacity = mochiContent ? "1" : "0";
-    this.contentEl.style.pointerEvents = mochiContent ? "auto" : "none";
+    const live = expanded && !greetingActive && State.view !== "knowura";
+    this.contentEl.style.opacity = live ? "1" : "0";
+    // While the drop sequence owns the body its buttons are painted on the canvas
+    // underneath, so only the header may keep taking clicks up here.
+    this.contentEl.style.pointerEvents = live && !this.uploadActive ? "auto" : "none";
+    this.header.el.style.pointerEvents = live ? "auto" : "none";
     this.knowuraLoading.style.opacity = expanded && State.view === "knowura" ? "1" : "0";
     this.greetingCanvas.style.display = greetingActive ? "block" : "none";
+
+    // Leaving the greeting, however it ends, lets its sound fade out.
+    if (this.greetingShown && !greetingActive) this.greeting.leave();
+    this.greetingShown = greetingActive;
+    // A wardrobe try-on never outlives the wardrobe.
+    if (State.wardrobePreview && !(expanded && State.view === "wardrobe")) State.wardrobePreview = null;
 
     this.header.sync();
     for (const [name, view] of this.views) {
@@ -1220,7 +1387,6 @@ export class Island {
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
     this.fsm.setAutoHide(State.settings.autoHide);
     this.fsm.openOnHover = State.settings.openOnHover;
-    if (!State.settings.autoHide) this.homeCollapseAt = null;
     // The island size is a setting: follow it without waiting for the next view change.
     this.animateGeometry(false);
     State.notify();

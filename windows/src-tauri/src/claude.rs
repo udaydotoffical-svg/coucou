@@ -1,19 +1,27 @@
-// Chat client. Two providers: the Claude API (the same integration as
-// ClaudeService.swift: multi-turn chat with web search, files sent as
-// document/image/text blocks) and any OpenAI-compatible endpoint (OpenAI,
-// OpenRouter, Groq, Together, Mistral, DeepSeek, Gemini, Ollama, LM Studio…).
+// Claude API client — the same integration as ClaudeService.swift: multi-turn
+// chat with web search, and files sent as document/image/text blocks.
 //
 // Everything happens here rather than in the island: the API key never leaves
-// the Credential Manager, and file bytes never cross the IPC boundary.
+// the credential store, and file bytes never cross the IPC boundary.
+//
+// COUCOU_ANTHROPIC_BASE_URL points the chat at an Anthropic-compatible gateway
+// instead (issue #180). Only that variable is read: Claude Code's own
+// ANTHROPIC_BASE_URL may name a proxy the user never meant to hand this key to.
 
-use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use reqwest::Url;
 use serde_json::{json, Value};
 
-use crate::secrets;
+use crate::chat::{self, Chat, ChatContext, ChatReply, ModelInfo};
+use crate::i18n::{t, tf};
+use crate::{net, secrets};
 
-const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+/// Credential store entry of the Anthropic API key.
+pub const KEY: &str = "anthropic-api-key";
+const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const BASE_URL_VAR: &str = "COUCOU_ANTHROPIC_BASE_URL";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Server-side fallback: on a policy decline the API retries the same request on
 /// a fallback model inside the same call, so the island never shows a dead end.
@@ -24,108 +32,45 @@ const MAX_INLINE_TEXT: u64 = 200_000;
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 
-const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
-You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
-Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
-No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
-
-/// Same persona, minus the web-search sentence: only the Claude API has that tool here.
-const OPENAI_SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
-You can help with absolutely anything — research, coding, recommendations, tasks, questions. \
-Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
-No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
-
-#[derive(Default)]
-pub struct Chat {
-    /// Full multi-turn history, including tool_use / tool_result blocks.
-    messages: Mutex<Vec<Value>>,
-    /// Which provider the history was written for. The two message formats are
-    /// not interchangeable, so switching provider starts a fresh conversation.
-    provider: Mutex<String>,
+/// The Messages endpoint: Anthropic's, or the gateway in COUCOU_ANTHROPIC_BASE_URL.
+/// Read once; the gateway's host (never the key) goes to the log once.
+fn endpoint() -> Result<Url, String> {
+    static ENDPOINT: OnceLock<Result<Url, String>> = OnceLock::new();
+    ENDPOINT
+        .get_or_init(|| {
+            let raw = std::env::var(BASE_URL_VAR).ok().filter(|v| !v.trim().is_empty());
+            let resolved = match raw {
+                None => Ok(Url::parse(DEFAULT_ENDPOINT).expect("valid default endpoint")),
+                Some(raw) => net::anthropic_endpoint(&raw),
+            };
+            match &resolved {
+                Ok(url) if url.as_str() != DEFAULT_ENDPOINT => crate::log::line(format!(
+                    "chat: Claude requests go to {} ({BASE_URL_VAR})",
+                    net::host_for_log(url)
+                )),
+                Err(err) => crate::log::line(format!("chat: {err}")),
+                _ => {}
+            }
+            resolved
+        })
+        .clone()
 }
 
-/// What the settings window chose: provider, endpoint and model.
-pub struct AiConfig {
-    pub provider: String,
-    pub base_url: String,
-    pub model: String,
+/// The model list endpoint next to the Messages one.
+fn models_endpoint(messages: &Url) -> Url {
+    let mut url = messages.clone();
+    let path = url.path().trim_end_matches("/messages").to_string();
+    url.set_path(&format!("{path}/models"));
+    url.set_query(Some("limit=100"));
+    url
 }
 
-impl Chat {
-    pub fn reset(&self) {
-        self.messages.lock().unwrap().clear();
-    }
-
-    fn use_provider(&self, tag: &str) {
-        let mut current = self.provider.lock().unwrap();
-        if *current != tag {
-            self.messages.lock().unwrap().clear();
-            *current = tag.to_string();
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.messages.lock().unwrap().is_empty()
-    }
-
-    fn push(&self, message: Value) {
-        self.messages.lock().unwrap().push(message);
-    }
-
-    fn pop(&self) {
-        self.messages.lock().unwrap().pop();
-    }
-
-    fn snapshot(&self) -> Vec<Value> {
-        self.messages.lock().unwrap().clone()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ChatContext {
-    File { name: String, path: String },
-    Window { app_name: String, title: String, url: Option<String> },
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatReply {
-    pub text: String,
-}
-
-/// One chat turn. Returns the assistant's text, or a message the island shows
-/// in the note view.
-pub async fn send(
-    chat: &Chat,
-    cfg: &AiConfig,
-    query: String,
-    context: Option<ChatContext>,
-) -> Result<ChatReply, String> {
-    if cfg.provider == "openai" {
-        chat.use_provider(&format!("openai {}", cfg.base_url));
-        send_openai(chat, cfg, query, context).await
-    } else {
-        chat.use_provider("anthropic");
-        send_anthropic(chat, &cfg.model, query, context).await
-    }
-}
-
-async fn send_anthropic(
-    chat: &Chat,
-    model: &str,
-    query: String,
-    context: Option<ChatContext>,
-) -> Result<ChatReply, String> {
-    let key = secrets::get("anthropic-api-key")
-        .ok_or_else(|| "API key missing. Open settings.".to_string())?;
-
+/// The user's content blocks for one turn. File / window context rides along
+/// with the first message only, exactly like ClaudeService.chat().
+fn user_content(first: bool, context: Option<&ChatContext>, query: &str) -> Vec<Value> {
     let mut content: Vec<Value> = Vec::new();
-
-    // File / window context rides along with the first message only, exactly
-    // like ClaudeService.chat().
-    if chat.is_empty() {
-        match &context {
+    if first {
+        match context {
             Some(ChatContext::File { name, path }) => {
                 if let Some(block) = file_block(path) {
                     content.push(block);
@@ -133,79 +78,91 @@ async fn send_anthropic(
                 content.push(json!({ "type": "text", "text": format!("File: {name}") }));
             }
             Some(ChatContext::Window { app_name, title, url }) => {
-                let mut text = format!("Context — App: {app_name}, Window: {title}");
-                if let Some(url) = url {
-                    text.push_str(&format!(", URL: {url}"));
-                }
-                content.push(json!({ "type": "text", "text": text }));
+                let line = chat::window_line(app_name, title, url.as_deref());
+                content.push(json!({ "type": "text", "text": line }));
             }
             None => {}
         }
     }
     content.push(json!({ "type": "text", "text": query }));
+    content
+}
 
-    chat.push(json!({ "role": "user", "content": content }));
-
-    let body = json!({
+fn request_body(model: &str, system: &str, history: &[Value], user: &Value) -> Value {
+    let mut messages = history.to_vec();
+    messages.push(user.clone());
+    json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "tools": [{ "type": "web_search_20260209", "name": "web_search", "max_uses": 5 }],
         "fallbacks": "default",
-        "messages": chat.snapshot(),
-    });
+        "messages": messages,
+    })
+}
 
-    let response = match call(&key, &body).await {
-        Ok(v) => v,
-        Err(err) => {
-            chat.pop(); // keep the history consistent with what the model saw
-            return Err(err);
-        }
-    };
-
-    // A policy decline comes back as HTTP 200 with stop_reason "refusal".
-    if response.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        chat.pop();
-        let why = response
-            .get("stop_details")
-            .and_then(|d| d.get("explanation"))
-            .and_then(Value::as_str)
-            .unwrap_or("Claude declined this one.");
-        return Err(why.to_string());
-    }
-
-    let Some(blocks) = response.get("content").and_then(Value::as_array).cloned() else {
-        chat.pop();
-        return Err("Unexpected API response.".into());
-    };
-
-    // Store the whole content — tool_use / tool_result blocks included — so the
-    // next turn has the right context.
-    chat.push(json!({ "role": "assistant", "content": blocks.clone() }));
-
-    let text = blocks
+/// The assistant's full text from a Messages API content array — the same as
+/// claudeResponseText() on the Mac (#67). Web search answers interleave text
+/// with tool blocks, and citations split a sentence across adjacent text
+/// blocks: every text block is kept, joined as is, and only the whole trimmed.
+pub fn response_text(content: &[Value]) -> Option<String> {
+    let text: String = content
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|b| b.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
 
-    if text.is_empty() {
-        return Err("No response text.".into());
+/// The content blocks to keep in the history and the text to show, or why there are none.
+fn interpret(response: &Value) -> Result<(Vec<Value>, String), String> {
+    // A policy decline comes back as HTTP 200 with stop_reason "refusal".
+    if response.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
+        let why = response
+            .pointer("/stop_details/explanation")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| t("Claude declined this one."));
+        return Err(why);
     }
+    let blocks = response
+        .get("content")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| t("Unexpected API response."))?;
+    let text = response_text(&blocks).ok_or_else(|| t("No response text."))?;
+    Ok((blocks, text))
+}
+
+/// One chat turn. Returns the assistant's text, or a message the island shows
+/// in the note view.
+pub async fn send(
+    chat: &Chat,
+    model: &str,
+    query: String,
+    context: Option<ChatContext>,
+) -> Result<ChatReply, String> {
+    let key = secrets::get(KEY).ok_or_else(|| t("API key missing. Open settings."))?;
+    let endpoint = endpoint()?;
+
+    let turn = chat.begin(chat::ANTHROPIC);
+    let user = json!({ "role": "user", "content": user_content(turn.first, context.as_ref(), &query) });
+    let body = request_body(model, &chat::system_prompt(true), &turn.history, &user);
+
+    let response = call(&endpoint, &key, &body).await?;
+    let (blocks, text) = interpret(&response)?;
+
+    // Store the whole content — tool_use / tool_result blocks included — so the
+    // next turn has the right context.
+    let plain = chat::plain_question(turn.first, context.as_ref(), &query);
+    chat.commit(&turn, user, json!({ "role": "assistant", "content": blocks }), &plain, &text);
     Ok(ChatReply { text })
 }
 
-async fn call(key: &str, body: &Value) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let response = client
-        .post(ENDPOINT)
+async fn call(endpoint: &Url, key: &str, body: &Value) -> Result<Value, String> {
+    let response = net::client(endpoint, Duration::from_secs(90))?
+        .post(endpoint.clone())
         .header("x-api-key", key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("anthropic-beta", FALLBACK_BETA)
@@ -213,191 +170,49 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("Network error: {e}"))?;
+        .map_err(|e| tf("Network error: {error}", &[("error", &e.to_string())]))?;
 
     let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
         // Surface the API's own message, which is what makes a bad key obvious.
-        let detail = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| {
-                v.get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| text.chars().take(200).collect());
-        return Err(format!("Claude API {status}: {detail}"));
+        let body = net::read_capped(response, net::MAX_ERROR_BODY).await.unwrap_or_default();
+        return Err(format!("Claude API {status}: {}", net::error_detail(&body)));
     }
-    serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
+    let bytes = net::read_capped(response, net::MAX_BODY).await?;
+    serde_json::from_slice(&bytes).map_err(|e| tf("Bad API response: {error}", &[("error", &e.to_string())]))
 }
 
-// ── OpenAI-compatible providers ───────────────────────────────────────────────
-
-/// A server on this machine (Ollama, LM Studio…) needs no key.
-fn is_local_url(url: &str) -> bool {
-    let rest = url.split("://").nth(1).unwrap_or(url);
-    let authority = rest.split('/').next().unwrap_or("");
-    let host = match authority.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or(""),
-        None => authority.split(':').next().unwrap_or(""),
-    };
-    let loopback_v4 = host.starts_with("127.") && host.split('.').all(|p| p.parse::<u8>().is_ok());
-    host == "localhost" || host == "::1" || loopback_v4
-}
-
-async fn send_openai(
-    chat: &Chat,
-    cfg: &AiConfig,
-    query: String,
-    context: Option<ChatContext>,
-) -> Result<ChatReply, String> {
-    let base = cfg.base_url.trim().trim_end_matches('/');
-    if !(base.starts_with("http://") || base.starts_with("https://")) {
-        return Err("Set the API base URL in settings, for example https://api.openai.com/v1".into());
-    }
-    let model = cfg.model.trim();
-    if model.is_empty() {
-        return Err("Set a model name in settings.".into());
-    }
-    let key = secrets::get("ai-api-key");
-    if key.is_none() && !is_local_url(base) {
-        return Err("API key missing. Open settings.".into());
-    }
-
-    let mut parts: Vec<Value> = Vec::new();
-    if chat.is_empty() {
-        match &context {
-            Some(ChatContext::File { name, path }) => {
-                parts.push(openai_file_part(path));
-                parts.push(json!({ "type": "text", "text": format!("File: {name}") }));
-            }
-            Some(ChatContext::Window { app_name, title, url }) => {
-                let mut text = format!("Context — App: {app_name}, Window: {title}");
-                if let Some(url) = url {
-                    text.push_str(&format!(", URL: {url}"));
-                }
-                parts.push(json!({ "type": "text", "text": text }));
-            }
-            None => {}
-        }
-    }
-    parts.push(json!({ "type": "text", "text": query }));
-
-    // Plain text goes as a string: it is the one shape every server accepts.
-    let content = match parts.as_slice() {
-        [only] => only.get("text").cloned().unwrap_or(Value::Null),
-        _ => Value::Array(parts),
-    };
-    chat.push(json!({ "role": "user", "content": content }));
-
-    let mut messages = vec![json!({ "role": "system", "content": OPENAI_SYSTEM_PROMPT })];
-    messages.extend(chat.snapshot());
-    let body = json!({ "model": model, "messages": messages });
-
-    let response = match call_openai(base, key.as_deref(), &body).await {
-        Ok(v) => v,
-        Err(err) => {
-            chat.pop();
-            return Err(err);
-        }
-    };
-
-    let message = response
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"));
-    let text = match message.and_then(|m| m.get("content")) {
-        Some(Value::String(s)) => s.trim().to_string(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string(),
-        _ => String::new(),
-    };
-    if text.is_empty() {
-        chat.pop();
-        let refusal = message
-            .and_then(|m| m.get("refusal"))
-            .and_then(Value::as_str)
-            .unwrap_or("No response text.");
-        return Err(refusal.to_string());
-    }
-
-    chat.push(json!({ "role": "assistant", "content": text }));
-    Ok(ChatReply { text })
-}
-
-async fn call_openai(base: &str, key: Option<&str>, body: &Value) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        // Local models can take a while to load before the first token.
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let mut request = client
-        .post(format!("{base}/chat/completions"))
-        .header("content-type", "application/json")
-        .json(body);
-    if let Some(key) = key {
-        request = request.bearer_auth(key);
-    }
-    let response = request.send().await.map_err(|e| format!("Network error: {e}"))?;
-
+/// The models on the user's Anthropic account, newest first, as the API lists them.
+pub async fn models(key: &str) -> Result<Vec<ModelInfo>, String> {
+    let url = models_endpoint(&endpoint()?);
+    let response = net::client(&url, Duration::from_secs(10))?
+        .get(url.clone())
+        .header("x-api-key", key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .send()
+        .await
+        .map_err(|e| tf("Network error: {error}", &[("error", &e.to_string())]))?;
     let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        let detail = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| {
-                v.get("error")
-                    .and_then(|e| e.get("message").or(Some(e)))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| text.chars().take(200).collect());
-        return Err(format!("API {status}: {detail}"));
+        let body = net::read_capped(response, net::MAX_ERROR_BODY).await.unwrap_or_default();
+        return Err(format!("Claude API {status}: {}", net::error_detail(&body)));
     }
-    serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
+    let bytes = net::read_capped(response, net::MAX_BODY).await?;
+    let json: Value = serde_json::from_slice(&bytes).map_err(|_| t("Unexpected API response."))?;
+    Ok(parse_models(&json))
 }
 
-/// Image → image_url part, text/code → inline text. PDFs have no portable
-/// shape in this API, so they are reported instead of silently dropped.
-fn openai_file_part(path: &str) -> Value {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let image = match ext.as_str() {
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "png" => Some("image/png"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        _ => None,
-    };
-    if let Some(media) = image {
-        if let Ok(bytes) = std::fs::read(path) {
-            return json!({
-                "type": "image_url",
-                "image_url": { "url": format!("data:{media};base64,{}", base64(&bytes)) },
-            });
-        }
-    }
-    if ext == "pdf" {
-        return json!({ "type": "text", "text": "(A PDF was attached, but this provider can't read PDFs.)" });
-    }
-
-    let small = std::fs::metadata(path).map(|m| m.len() <= MAX_INLINE_TEXT).unwrap_or(false);
-    match small.then(|| std::fs::read_to_string(path).ok()).flatten() {
-        Some(text) => json!({ "type": "text", "text": format!("File contents:\n{text}") }),
-        None => json!({ "type": "text", "text": "(The attached file couldn't be read as text.)" }),
-    }
+fn parse_models(json: &Value) -> Vec<ModelInfo> {
+    json.get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            let label = m.get("display_name").and_then(Value::as_str).unwrap_or(&id).to_string();
+            Some(ModelInfo { id, label })
+        })
+        .collect()
 }
 
 /// PDF → document block, image → image block, text/code → inline text.
@@ -435,7 +250,7 @@ fn file_block(path: &str) -> Option<Value> {
 }
 
 /// Small standalone base64 encoder — not worth another dependency.
-/// Also used for Stripe's basic auth.
+/// Also used for Stripe's basic auth and the images sent to other providers.
 pub(crate) fn base64_for(bytes: &[u8]) -> String {
     base64(bytes)
 }
@@ -456,33 +271,7 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, is_local_url};
-
-    #[test]
-    fn local_servers_need_no_key_but_hosted_ones_do() {
-        assert!(is_local_url("http://localhost:11434/v1"));
-        assert!(is_local_url("http://127.0.0.1:1234/v1"));
-        assert!(is_local_url("http://[::1]:8080/v1"));
-        assert!(!is_local_url("https://api.openai.com/v1"));
-        assert!(!is_local_url("https://localhost.evil.example/v1"));
-        assert!(!is_local_url("http://127.evil.example/v1"));
-    }
-
-    #[test]
-    fn settings_are_clamped_to_what_the_island_can_draw() {
-        let s = crate::settings::Settings {
-            island_width: 5000.0,
-            island_height_extra: -500.0,
-            compact_height: 1.0,
-            ai_provider: "bogus".into(),
-            ..Default::default()
-        }
-        .sanitized();
-        assert_eq!(s.island_width, crate::settings::ISLAND_WIDTH_MAX);
-        assert_eq!(s.island_height_extra, crate::settings::ISLAND_HEIGHT_EXTRA_MIN);
-        assert_eq!(s.compact_height, crate::settings::COMPACT_HEIGHT_MIN);
-        assert_eq!(s.ai_provider, "anthropic");
-    }
+    use super::*;
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
@@ -493,5 +282,94 @@ mod tests {
         assert_eq!(base64(b"foob"), "Zm9vYg==");
         assert_eq!(base64(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    fn texts(parts: &[&str]) -> Vec<Value> {
+        parts.iter().map(|t| json!({ "type": "text", "text": t })).collect()
+    }
+
+    #[test]
+    fn every_text_block_is_kept_in_order_without_added_separators() {
+        assert_eq!(response_text(&texts(&["Simple answer."])).as_deref(), Some("Simple answer."));
+        let content = vec![
+            json!({"type":"text","text":"I'll look that up.\n"}),
+            json!({"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{"query":"test"}}),
+            json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu_01","content":[]}),
+            json!({"type":"text","text":"The answer is 42."}),
+        ];
+        assert_eq!(response_text(&content).as_deref(), Some("I'll look that up.\nThe answer is 42."));
+        // An empty leading block does not hide the answer.
+        let content = vec![
+            json!({"type":"text","text":""}),
+            json!({"type":"web_search_tool_result","tool_use_id":"b","content":[]}),
+            json!({"type":"text","text":"Here is the actual answer."}),
+        ];
+        assert_eq!(response_text(&content).as_deref(), Some("Here is the actual answer."));
+        // Citations split a sentence across blocks: no newline is inserted.
+        assert_eq!(
+            response_text(&texts(&["Paris is the ", "capital", " of France."])).as_deref(),
+            Some("Paris is the capital of France.")
+        );
+        // Search result text never leaks into the answer.
+        let content = vec![
+            json!({"type":"text","text":"Answer."}),
+            json!({"type":"web_search_tool_result","tool_use_id":"a","content":[{"type":"web_search_result","title":"Page","text":"Leak"}]}),
+        ];
+        assert_eq!(response_text(&content).as_deref(), Some("Answer."));
+        assert_eq!(response_text(&[json!({"type":"server_tool_use","id":"x"})]), None);
+        assert_eq!(response_text(&texts(&["", "  \n"])), None);
+    }
+
+    #[test]
+    fn a_refusal_or_an_empty_answer_is_an_error() {
+        let refusal = json!({"stop_reason":"refusal","stop_details":{"explanation":"Not this."},"content":[]});
+        assert_eq!(interpret(&refusal).unwrap_err(), "Not this.");
+        assert_eq!(interpret(&json!({"stop_reason":"refusal"})).unwrap_err(), "Claude declined this one.");
+        assert_eq!(interpret(&json!({"id":"x"})).unwrap_err(), "Unexpected API response.");
+        assert_eq!(interpret(&json!({"content":[]})).unwrap_err(), "No response text.");
+        let (blocks, text) = interpret(&json!({"content":[{"type":"text","text":" Hi "}]})).unwrap();
+        assert_eq!(text, "Hi");
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn the_request_carries_history_web_search_and_the_new_turn_last() {
+        let history = vec![json!({"role":"user","content":"a"}), json!({"role":"assistant","content":"b"})];
+        let user = json!({"role":"user","content":[{"type":"text","text":"c"}]});
+        let body = request_body("claude-x", "sys", &history, &user);
+        assert_eq!(body["model"], "claude-x");
+        assert_eq!(body["system"], "sys");
+        assert_eq!(body["max_tokens"], MAX_TOKENS);
+        assert_eq!(body["tools"][0]["name"], "web_search");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(body["messages"][2], user);
+    }
+
+    #[test]
+    fn context_is_sent_with_the_first_turn_only() {
+        let ctx = ChatContext::Window { app_name: "Edge".into(), title: "Docs".into(), url: Some("https://x.dev".into()) };
+        let first = user_content(true, Some(&ctx), "q");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0]["text"], "Context — App: Edge, Window: Docs, URL: https://x.dev");
+        assert_eq!(user_content(false, Some(&ctx), "q"), vec![json!({"type":"text","text":"q"})]);
+        // A file that cannot be read still names itself.
+        let ctx = ChatContext::File { name: "gone.pdf".into(), path: "/no/such/gone.pdf".into() };
+        assert_eq!(user_content(true, Some(&ctx), "q")[0]["text"], "File: gone.pdf");
+    }
+
+    #[test]
+    fn the_model_list_sits_next_to_the_messages_endpoint() {
+        let url = Url::parse(DEFAULT_ENDPOINT).unwrap();
+        assert_eq!(models_endpoint(&url).as_str(), "https://api.anthropic.com/v1/models?limit=100");
+        let url = net::anthropic_endpoint("https://gw.example.com/anthropic").unwrap();
+        assert_eq!(models_endpoint(&url).as_str(), "https://gw.example.com/anthropic/v1/models?limit=100");
+        let list = json!({"data":[{"id":"claude-opus-5","display_name":"Claude Opus 5"},{"id":"claude-x"},{"nope":1}]});
+        assert_eq!(
+            parse_models(&list),
+            vec![
+                ModelInfo { id: "claude-opus-5".into(), label: "Claude Opus 5".into() },
+                ModelInfo { id: "claude-x".into(), label: "claude-x".into() },
+            ]
+        );
     }
 }

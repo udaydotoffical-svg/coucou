@@ -9,7 +9,7 @@
 import { Bridge, onEvent } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { BotEngine } from "../mochi/engine";
-import { resolveOutfit, type Outfit } from "../mochi/outfits";
+import { parseOutfit, resolveOutfit } from "../mochi/wardrobe";
 import type { Settings } from "../core/state";
 
 const W = 132;
@@ -68,7 +68,7 @@ function setPhase(p: Phase, text: string | null) {
 function applySettings(s: Settings) {
   Sound.setEnabled(s.soundEnabled);
   Sound.setVolume(s.soundVolume);
-  const outfit = resolveOutfit((s.mochiOutfit || "auto") as Outfit);
+  const outfit = resolveOutfit(parseOutfit(s.mochiOutfit), new Date());
   engine.setOutfit(outfit, true);
 }
 

@@ -1,8 +1,17 @@
-// Live diff: the file changes Claude makes, turned into lines the island can show.
-// A port of CoucouKit/DiffEngine.swift (same limits, same hunks, same ticker step encoding).
+// Live diff — port of DiffEngine.swift (NotchBuddy/Sources/CoucouKit).
+//
+// Line diff (LCS) with 3-line context hunks, used for the Edit / MultiEdit /
+// Write tool calls the hooks see. Same size guards as macOS: beyond 200 KB or
+// 4 000 lines, or when the LCS table would pass a million cells, only the
+// +N −M counts are kept and the diff is marked `tooLarge`.
+//
+// Also home to `toOneLine` (Claude's final message → one line of plain text)
+// and the diff step encoding the ticker reads.
+
+export type DiffKind = "context" | "added" | "removed";
 
 export interface DiffLine {
-  kind: "context" | "added" | "removed";
+  kind: DiffKind;
   text: string;
   /** 1-based; -1 for pure adds. */
   origLine: number;
@@ -10,168 +19,132 @@ export interface DiffLine {
   newLine: number;
 }
 
-export interface DiffHunk { origStart: number; newStart: number; lines: DiffLine[] }
+export interface DiffHunk {
+  origStart: number;
+  newStart: number;
+  lines: DiffLine[];
+}
 
 export interface FileDiff {
-  /** Stable identifier, assigned by State.appendSessionDiff. */
+  /** Stable identifier assigned by State.appendSessionDiff. */
   id: number;
   path: string;
   added: number;
   removed: number;
   hunks: DiffHunk[];
   tooLarge: boolean;
-  /** True when it came from a Write (the whole file is new). */
+  /** True when produced by fromNew (Write tool). */
   isNewFile: boolean;
 }
 
+/** FileDiff.maxBytes / maxLines on macOS. */
 export const DIFF_MAX_BYTES = 200 * 1024;
 export const DIFF_MAX_LINES = 4000;
+/** LCS is O(m·n): bail out before the quadratic blowup. */
+const DIFF_MAX_CELLS = 1_000_000;
+const CONTEXT = 3;
 
-export function diffName(d: { path: string }): string {
-  return d.path.split(/[\\/]/).pop() || d.path;
+const encoder = new TextEncoder();
+const utf8Length = (s: string) => encoder.encode(s).length;
+
+/** Last path component, Windows or POSIX separators. */
+export function fileName(path: string): string {
+  const cleaned = path.replace(/[\\/]+$/, "");
+  const idx = Math.max(cleaned.lastIndexOf("\\"), cleaned.lastIndexOf("/"));
+  return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
 }
 
-const byteLen = (s: string) => new TextEncoder().encode(s).length;
+// ── Public API ────────────────────────────────────────────────────────────────
 
-function splitLines(text: string): string[] {
-  const parts = text.replace(/\r\n/g, "\n").split("\n");
-  if (parts.length && parts[parts.length - 1] === "") parts.pop();
-  return parts;
-}
-
-function countFallback(old: string, now: string, path: string, tooLarge: boolean): FileDiff {
-  const oldLines = old.split("\n");
-  const newLines = now.split("\n");
-  const oldSet = new Set(oldLines);
-  const newSet = new Set(newLines);
+export function fromEdit(oldText: string, newText: string, path: string): FileDiff {
+  if (utf8Length(oldText) + utf8Length(newText) > DIFF_MAX_BYTES) {
+    return countFallback(oldText, newText, path);
+  }
+  const oldLines = splitLines(oldText);
+  const newLines = splitLines(newText);
+  if (oldLines.length + newLines.length > DIFF_MAX_LINES) {
+    return countFallback(oldText, newText, path);
+  }
+  if (oldLines.length * newLines.length > DIFF_MAX_CELLS) {
+    return countFallback(oldText, newText, path);
+  }
+  const flat = buildDiffLines(oldLines, newLines);
+  let added = 0;
+  let removed = 0;
+  for (const l of flat) {
+    if (l.kind === "added") added++;
+    else if (l.kind === "removed") removed++;
+  }
   return {
-    id: 0, path, tooLarge, isNewFile: false, hunks: [],
-    added: newLines.filter((l) => l !== "" && !oldSet.has(l)).length,
-    removed: oldLines.filter((l) => l !== "" && !newSet.has(l)).length,
+    id: 0, path, added, removed, hunks: buildHunks(flat, CONTEXT), tooLarge: false, isNewFile: false,
   };
 }
 
-/** Line diff by longest common subsequence. */
-function buildDiffLines(a: string[], b: string[]): DiffLine[] {
-  const m = a.length, n = b.length;
-  const dp: Uint32Array[] = [];
-  for (let i = 0; i <= m; i++) dp.push(new Uint32Array(n + 1));
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
-  const matches: [number, number][] = [];
-  let i = m, j = n;
-  while (i > 0 && j > 0) {
-    if (a[i - 1] === b[j - 1]) { matches.push([i - 1, j - 1]); i--; j--; }
-    else if (dp[i - 1][j] >= dp[i][j - 1]) i--;
-    else j--;
-  }
-  matches.reverse();
-
-  const out: DiffLine[] = [];
-  let prevOld = -1, prevNew = -1;
-  const removeUpTo = (to: number) => {
-    for (let k = prevOld + 1; k < to; k++) out.push({ kind: "removed", text: a[k], origLine: k + 1, newLine: -1 });
-  };
-  const addUpTo = (to: number) => {
-    for (let k = prevNew + 1; k < to; k++) out.push({ kind: "added", text: b[k], origLine: -1, newLine: k + 1 });
-  };
-  for (const [oi, ni] of matches) {
-    removeUpTo(oi);
-    addUpTo(ni);
-    out.push({ kind: "context", text: a[oi], origLine: oi + 1, newLine: ni + 1 });
-    prevOld = oi;
-    prevNew = ni;
-  }
-  removeUpTo(m);
-  addUpTo(n);
-  return out;
-}
-
-/** The changed lines with three lines of context either side; overlapping ranges merge. */
-function buildHunks(lines: DiffLine[], context: number): DiffHunk[] {
-  const changed: number[] = [];
-  lines.forEach((l, i) => { if (l.kind !== "context") changed.push(i); });
-  if (!changed.length) return [];
-  const merged: [number, number][] = [];
-  for (const idx of changed) {
-    const r: [number, number] = [Math.max(0, idx - context), Math.min(lines.length - 1, idx + context)];
-    const last = merged[merged.length - 1];
-    if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]);
-    else merged.push(r);
-  }
-  return merged.map(([s, e]) => {
-    const hl = lines.slice(s, e + 1);
-    return {
-      origStart: hl.find((l) => l.origLine > 0)?.origLine ?? 1,
-      newStart: hl.find((l) => l.newLine > 0)?.newLine ?? 1,
-      lines: hl,
-    };
-  });
-}
-
-export function diffFromEdit(old: string, now: string, path: string): FileDiff {
-  if (byteLen(old) + byteLen(now) > DIFF_MAX_BYTES) return countFallback(old, now, path, true);
-  const a = splitLines(old), b = splitLines(now);
-  if (a.length + b.length > DIFF_MAX_LINES) return countFallback(old, now, path, true);
-  // The table is quadratic: bail out before it blows up.
-  if (a.length * b.length > 1_000_000) return countFallback(old, now, path, true);
-  const flat = buildDiffLines(a, b);
-  return {
-    id: 0, path, tooLarge: false, isNewFile: false,
-    hunks: buildHunks(flat, 3),
-    added: flat.filter((l) => l.kind === "added").length,
-    removed: flat.filter((l) => l.kind === "removed").length,
-  };
-}
-
-export function diffFromNew(content: string, path: string): FileDiff {
-  if (byteLen(content) > DIFF_MAX_BYTES) {
-    return { id: 0, path, added: content.split("\n").length, removed: 0, hunks: [], tooLarge: true, isNewFile: true };
+export function fromNew(content: string, path: string): FileDiff {
+  if (utf8Length(content) > DIFF_MAX_BYTES) {
+    const lineCount = content.split("\n").length;
+    return { id: 0, path, added: lineCount, removed: 0, hunks: [], tooLarge: true, isNewFile: true };
   }
   const lines = splitLines(content);
   if (lines.length > DIFF_MAX_LINES) {
     return { id: 0, path, added: lines.length, removed: 0, hunks: [], tooLarge: true, isNewFile: true };
   }
-  const diffLines: DiffLine[] = lines.map((text, i) => ({ kind: "added", text, origLine: -1, newLine: i + 1 }));
+  const diffLines: DiffLine[] = lines.map((text, i) => ({
+    kind: "added", text, origLine: -1, newLine: i + 1,
+  }));
   return {
-    id: 0, path, added: diffLines.length, removed: 0, tooLarge: false, isNewFile: true,
+    id: 0,
+    path,
+    added: diffLines.length,
+    removed: 0,
     hunks: diffLines.length ? [{ origStart: 0, newStart: 1, lines: diffLines }] : [],
+    tooLarge: false,
+    isNewFile: true,
   };
 }
 
-/** The diff of an Edit / MultiEdit / Write tool call, or null for anything else (or no change). */
-export function diffFromTool(tool: string, input: Record<string, unknown>): FileDiff | null {
-  const str = (v: unknown) => (typeof v === "string" ? v : null);
+/**
+ * HookServer.buildFileDiff — the diff of one Edit, MultiEdit or Write tool call,
+ * or null when the call changes nothing (or is not a file edit at all).
+ */
+export function buildFileDiff(tool: string, input: Record<string, unknown>): FileDiff | null {
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
   const path = str(input.file_path);
-  if (!path) return null;
   switch (tool) {
     case "Edit": {
-      const old = str(input.old_string), now = str(input.new_string);
-      if (old == null || now == null || (!old && !now)) return null;
-      const d = diffFromEdit(old, now, path);
+      const oldText = str(input.old_string);
+      const newText = str(input.new_string);
+      if (oldText == null || newText == null || path == null) return null;
+      if (!oldText && !newText) return null;
+      const d = fromEdit(oldText, newText, path);
       return d.added > 0 || d.removed > 0 ? d : null;
     }
     case "MultiEdit": {
-      const edits = Array.isArray(input.edits) ? (input.edits as Record<string, unknown>[]) : [];
-      if (!edits.length) return null;
-      let added = 0, removed = 0, tooLarge = false;
+      const edits = input.edits;
+      if (path == null || !Array.isArray(edits) || edits.length === 0) return null;
+      let added = 0;
+      let removed = 0;
+      let tooLarge = false;
       const hunks: DiffHunk[] = [];
-      for (const e of edits) {
-        const old = str(e.old_string), now = str(e.new_string);
-        if (old == null || now == null) continue;
-        const d = diffFromEdit(old, now, path);
-        added += d.added; removed += d.removed; hunks.push(...d.hunks);
+      for (const edit of edits) {
+        if (!edit || typeof edit !== "object") continue;
+        const e = edit as Record<string, unknown>;
+        const oldText = str(e.old_string);
+        const newText = str(e.new_string);
+        if (oldText == null || newText == null) continue;
+        const d = fromEdit(oldText, newText, path);
+        added += d.added;
+        removed += d.removed;
+        hunks.push(...d.hunks);
         if (d.tooLarge) tooLarge = true;
       }
-      return added > 0 || removed > 0 ? { id: 0, path, added, removed, hunks, tooLarge, isNewFile: false } : null;
+      if (added === 0 && removed === 0) return null;
+      return { id: 0, path, added, removed, hunks, tooLarge, isNewFile: false };
     }
     case "Write": {
       const content = str(input.content);
-      if (!content) return null;
-      const d = diffFromNew(content, path);
+      if (path == null || !content) return null;
+      const d = fromNew(content, path);
       return d.added > 0 || d.removed > 0 ? d : null;
     }
     default:
@@ -179,56 +152,175 @@ export function diffFromTool(tool: string, input: Record<string, unknown>): File
   }
 }
 
-// ── The ticker step that stands for a diff ────────────────────────────────────
+// ── Line splitting ────────────────────────────────────────────────────────────
 
-/** A private-use character that marks a ticker step as a file diff. */
+function splitLines(text: string): string[] {
+  const parts = text.replace(/\r\n/g, "\n").split("\n");
+  // A trailing newline leaves one empty element behind.
+  if (parts[parts.length - 1] === "") parts.pop();
+  return parts;
+}
+
+// ── LCS diff ──────────────────────────────────────────────────────────────────
+
+function buildDiffLines(oldLines: string[], newLines: string[]): DiffLine[] {
+  const m = oldLines.length;
+  const n = newLines.length;
+  const w = n + 1;
+  // dp[i*w + j] = LCS length of oldLines[0..<i] and newLines[0..<j]. Lengths stay
+  // under DIFF_MAX_LINES, so 16 bits are plenty and the table is half the size.
+  const dp = new Uint16Array((m + 1) * w);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i * w + j] = oldLines[i - 1] === newLines[j - 1]
+        ? dp[(i - 1) * w + j - 1] + 1
+        : Math.max(dp[(i - 1) * w + j], dp[i * w + j - 1]);
+    }
+  }
+
+  // Backtrack to the matching pairs.
+  const matches: [number, number][] = [];
+  let i = m;
+  let j = n;
+  while (i > 0 && j > 0) {
+    if (oldLines[i - 1] === newLines[j - 1]) {
+      matches.push([i - 1, j - 1]);
+      i--;
+      j--;
+    } else if (dp[(i - 1) * w + j] >= dp[i * w + j - 1]) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+  matches.reverse();
+
+  const result: DiffLine[] = [];
+  let prevOld = -1;
+  let prevNew = -1;
+  const removedLine = (k: number): DiffLine => ({ kind: "removed", text: oldLines[k], origLine: k + 1, newLine: -1 });
+  const addedLine = (k: number): DiffLine => ({ kind: "added", text: newLines[k], origLine: -1, newLine: k + 1 });
+  for (const [oi, ni] of matches) {
+    for (let k = prevOld + 1; k < oi; k++) result.push(removedLine(k));
+    for (let k = prevNew + 1; k < ni; k++) result.push(addedLine(k));
+    result.push({ kind: "context", text: oldLines[oi], origLine: oi + 1, newLine: ni + 1 });
+    prevOld = oi;
+    prevNew = ni;
+  }
+  for (let k = prevOld + 1; k < m; k++) result.push(removedLine(k));
+  for (let k = prevNew + 1; k < n; k++) result.push(addedLine(k));
+  return result;
+}
+
+// ── Hunks ─────────────────────────────────────────────────────────────────────
+
+function buildHunks(lines: DiffLine[], context: number): DiffHunk[] {
+  const merged: [number, number][] = [];
+  lines.forEach((line, i) => {
+    if (line.kind === "context") return;
+    const start = Math.max(0, i - context);
+    const end = Math.min(lines.length - 1, i + context);
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  });
+  return merged.map(([start, end]) => {
+    const hunkLines = lines.slice(start, end + 1);
+    return {
+      origStart: hunkLines.find((l) => l.origLine > 0)?.origLine ?? 1,
+      newStart: hunkLines.find((l) => l.newLine > 0)?.newLine ?? 1,
+      lines: hunkLines,
+    };
+  });
+}
+
+// ── Count fallback (too large) ────────────────────────────────────────────────
+
+function countFallback(oldText: string, newText: string, path: string): FileDiff {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const oldSet = new Set(oldLines);
+  const newSet = new Set(newLines);
+  const added = newLines.filter((l) => l !== "" && !oldSet.has(l)).length;
+  const removed = oldLines.filter((l) => l !== "" && !newSet.has(l)).length;
+  return { id: 0, path, added, removed, hunks: [], tooLarge: true, isNewFile: false };
+}
+
+// ── toOneLine ─────────────────────────────────────────────────────────────────
+
+/**
+ * A possibly multi-line Markdown message as one line of plain text: only the
+ * first non-empty paragraph (a blank line, a horizontal rule or a table row ends
+ * it), without `**`, `__`, backticks, leading `#` or list markers.
+ */
+export function toOneLine(text: string, maxChars = 200): string {
+  const trimWS = (s: string) => s.replace(/^[ \t]+|[ \t]+$/g, "");
+  const paragraphs: string[][] = [];
+  let current: string[] = [];
+  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+    const t = trimWS(line);
+    const isHR = t.length >= 3 && (/^-+$/.test(t) || /^\*+$/.test(t) || /^_+$/.test(t));
+    if (t === "" || isHR || t.startsWith("|")) {
+      if (current.length) paragraphs.push(current);
+      current = [];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length) paragraphs.push(current);
+
+  for (const para of paragraphs) {
+    const s = para.join("\n").replaceAll("**", "").replaceAll("__", "").replaceAll("`", "");
+    const processed: string[] = [];
+    for (const line of s.split("\n")) {
+      let l = trimWS(line.replace(/^#+/, ""));
+      if (l.startsWith("- ") || l.startsWith("* ") || l.startsWith("• ")) l = l.slice(2);
+      else l = l.replace(/^\d+\.\s+/, "");
+      l = trimWS(l);
+      if (l) processed.push(l);
+    }
+    const collapsed = processed.join(" ").split(/\s+/).filter(Boolean).join(" ");
+    if (collapsed) return Array.from(collapsed).slice(0, maxChars).join("");
+  }
+  return "";
+}
+
+// ── Diff steps ────────────────────────────────────────────────────────────────
+// A diff shows up in the ticker as a step string the user never sees raw:
+// `"<filename>\t<added>:<removed>:<diffId>"` — same format as macOS.
+
 export const DIFF_STEP_MARKER = "";
 
-export const isDiffStep = (s: string) => s.startsWith(DIFF_STEP_MARKER);
+export interface DiffStep {
+  filename: string;
+  added: number;
+  removed: number;
+  diffId: number;
+}
+
+export function isDiffStep(step: string): boolean {
+  return step.startsWith(DIFF_STEP_MARKER);
+}
 
 export function makeDiffStep(filename: string, added: number, removed: number, diffId: number): string {
   return `${DIFF_STEP_MARKER}${filename}\t${added}:${removed}:${diffId}`;
 }
 
-export function parseDiffStep(s: string): { filename: string; added: number; removed: number; diffId: number } | null {
-  if (!isDiffStep(s)) return null;
-  const body = s.slice(1);
+export function parseDiffStep(step: string): DiffStep | null {
+  if (!isDiffStep(step)) return null;
+  const body = step.slice(DIFF_STEP_MARKER.length);
   const tab = body.indexOf("\t");
   if (tab < 0) return null;
   const parts = body.slice(tab + 1).split(":");
-  if (parts.length !== 3) return null;
-  const [added, removed, diffId] = parts.map((p) => Number.parseInt(p, 10));
-  if ([added, removed, diffId].some((n) => Number.isNaN(n))) return null;
+  if (parts.length !== 3 || !parts.every((p) => /^-?\d+$/.test(p))) return null;
+  const [added, removed, diffId] = parts.map(Number);
   return { filename: body.slice(0, tab), added, removed, diffId };
 }
 
-/**
- * A possibly multi-line, Markdown-formatted text as one line of plain text: the first
- * paragraph that says anything (a paragraph ends at a blank line, a rule or a table row),
- * without bold markers, backticks, leading # and bullet markers.
- */
-export function toOneLine(text: string, maxChars = 200): string {
-  const paragraphs: string[][] = [];
-  let current: string[] = [];
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    const isHR = t.length >= 3 && (/^-+$/.test(t) || /^\*+$/.test(t) || /^_+$/.test(t));
-    if (t === "" || isHR || t.startsWith("|")) {
-      if (current.length) { paragraphs.push(current); current = []; }
-    } else current.push(line);
+/** The last step that is text, never a diff marker. */
+export function lastTextStep(steps: readonly string[]): string | undefined {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (!isDiffStep(steps[i])) return steps[i];
   }
-  if (current.length) paragraphs.push(current);
-
-  for (const para of paragraphs) {
-    const s = para.join("\n").replace(/\*\*/g, "").replace(/__/g, "").replace(/`/g, "");
-    const processed = s.split("\n").map((line) => {
-      let l = line.replace(/^#+/, "").trim();
-      if (/^(- |\* |• )/.test(l)) l = l.slice(2);
-      else l = l.replace(/^\d+\.\s+/, "");
-      return l.trim();
-    }).filter(Boolean);
-    const collapsed = processed.join(" ").split(/\s+/).filter(Boolean).join(" ");
-    if (collapsed) return collapsed.slice(0, maxChars);
-  }
-  return "";
+  return undefined;
 }

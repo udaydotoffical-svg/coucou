@@ -119,22 +119,37 @@ targets:
       - path: Resources/sounds
         buildPhase: resources
         type: folder
+      - path: Resources/Localizable.xcstrings
+        buildPhase: resources
     info:
       path: Resources/Info.plist
       properties:
         CFBundleName: Coucou
         CFBundleDisplayName: Coucou
         CFBundleIdentifier: fr.louisraille.NotchBuddy
-        CFBundleVersion: "9"
-        CFBundleShortVersionString: "0.1.8"
+        CFBundleVersion: "13"
+        CFBundleShortVersionString: "0.2.2"
         CFBundlePackageType: APPL
         LSUIElement: YES
         NSHighResolutionCapable: YES
         NSSupportsAutomaticGraphicsSwitching: YES
-        NSAppleEventsUsageDescription: "Pour sauter au terminal, envoyer des mails et piloter Musique."
+        NSAppleEventsUsageDescription: "Pour sauter au terminal, envoyer des mails et piloter Musique et Spotify."
+        NSMicrophoneUsageDescription: "Coucou uses the microphone when you dictate a message in the chat."
+        NSSpeechRecognitionUsageDescription: "Coucou turns your voice into the text of a chat message."
         NSAccessibilityUsageDescription: "Pour lire le titre de la fenêtre active et l'attacher comme contexte."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        CFBundleLocalizations:
+          - en
+          - ar
+          - bn
+          - es
+          - fr
+          - hi
+          - id
+          - pt-BR
+          - ru
+          - zh-Hans
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: fr.louisraille.NotchBuddy
@@ -173,13 +188,15 @@ targets:
       - path: Resources/sounds
         buildPhase: resources
         type: folder
+      - path: Resources/Localizable.xcstrings
+        buildPhase: resources
     info:
       path: Resources/InfoAppStore.plist
       properties:
         CFBundleName: Coucou
         CFBundleDisplayName: Coucou
         CFBundleIdentifier: fr.louisraille.Coucou
-        CFBundleVersion: "5"
+        CFBundleVersion: "6"
         CFBundleShortVersionString: "1.1"
         CFBundlePackageType: APPL
         LSUIElement: YES
@@ -189,6 +206,17 @@ targets:
         ITSAppUsesNonExemptEncryption: NO
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        CFBundleLocalizations:
+          - en
+          - ar
+          - bn
+          - es
+          - fr
+          - hi
+          - id
+          - pt-BR
+          - ru
+          - zh-Hans
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: fr.louisraille.Coucou
@@ -243,7 +271,7 @@ targets:
         CFBundleName: Coucou
         CFBundleDisplayName: Coucou
         CFBundleIdentifier: fr.louisraille.Coucou
-        CFBundleVersion: "2"
+        CFBundleVersion: "3"
         CFBundleShortVersionString: "1.0"
         CFBundlePackageType: APPL
         LSRequiresIPhoneOS: YES
@@ -323,7 +351,7 @@ targets:
         CFBundleName: CoucouWidgets
         CFBundleDisplayName: Coucou
         CFBundleIdentifier: fr.louisraille.Coucou.Widgets
-        CFBundleVersion: "2"
+        CFBundleVersion: "3"
         CFBundleShortVersionString: "1.0"
         CFBundlePackageType: XPC!
         NSExtension:
@@ -366,7 +394,7 @@ targets:
         CFBundleName: CoucouNotificationContent
         CFBundleDisplayName: Coucou
         CFBundleIdentifier: fr.louisraille.Coucou.NotificationContent
-        CFBundleVersion: "2"
+        CFBundleVersion: "3"
         CFBundleShortVersionString: "1.0"
         CFBundlePackageType: XPC!
         NSExtension:
