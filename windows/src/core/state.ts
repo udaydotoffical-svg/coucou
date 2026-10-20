@@ -13,6 +13,7 @@ import type { Bindings } from "./shortcuts";
 import { DEFAULT_OUTFIT, type Outfit } from "../mochi/wardrobe";
 import { pillColor } from "./pill-colors";
 import type { RGB } from "./color";
+import { CALM_MOOD, type MochiMood } from "../mochi/engine";
 
 export type AgentSource = "claudeCode" | "n8n" | "agent";
 export type PillBadge = "approval" | "finished" | "error";
@@ -144,6 +145,10 @@ export interface Settings {
   soundEnabled: boolean;
   soundVolume: number;
   autoCloseInterval: number;
+  /** Hovering the island opens it all the way (off: hovering only peeks). */
+  openOnHover: boolean;
+  /** Date and time in the middle of the compact island. */
+  showClock: boolean;
   absenceInterval: number;
   /** Declared pills next to the main one (at most 4), in the order they were added. */
   activeIntegrations: string[];
@@ -187,6 +192,17 @@ export interface Settings {
    * else English), or one of src/i18n's ten codes ("fr", "pt-BR", "zh-Hans"…).
    */
   language: string;
+  /**
+   * The phone link for Coucou for Android is on. Rust owns it (only the switch in
+   * Settings → Android phone turns it on): whatever the page sends back is ignored.
+   */
+  phoneLink?: boolean;
+  /** The phone may chat through this computer's API keys. Rust owns it too. */
+  phoneChat?: boolean;
+  /** The phone may see session details (steps, last line, folder name, colour). Rust owns it too. */
+  phoneDetails?: boolean;
+  /** Which models the phone may use, "provider/model". Rust owns it too. */
+  phoneChatModels?: string[];
   /** Mochi on the desktop. Rust owns it: whatever the page sends back is ignored. */
   desktopMochi?: {
     onDesktop: boolean;
@@ -207,6 +223,8 @@ export interface Settings {
   showMusicOnNotch: boolean;
   /** Mochi wears headphones while music plays. */
   mochiHeadphones: boolean;
+  /** Mochi reacts to the PC: sweats when it is busy, puffs up when memory is short, tires on a low battery. */
+  mochiFeelsPc: boolean;
   /** Mochi dances to the music. */
   mochiDances: boolean;
   /** Knowura Speak: hold Ctrl+Win, talk, and the words are typed where you were typing. */
@@ -229,8 +247,6 @@ export interface Settings {
   showMiniPills: boolean;
   /** Close the open island, and the Knowura panel, when you click anywhere else. */
   closeOnClickOutside: boolean;
-  /** Open when the pointer rests on the island, close when it leaves. */
-  openOnHover: boolean;
   /** When off, the island never closes or hides by itself. */
   autoHide: boolean;
   alwaysOnTop: boolean;
@@ -241,6 +257,8 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEnabled: true,
   soundVolume: 0.12,
   autoCloseInterval: 15,
+  openOnHover: false,
+  showClock: false,
   absenceInterval: 180,
   activeIntegrations: [
     "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
@@ -269,6 +287,7 @@ export const DEFAULT_SETTINGS: Settings = {
   squareSlots: ["", ""],
   showMusicOnNotch: true,
   mochiHeadphones: true,
+  mochiFeelsPc: true,
   mochiDances: true,
   speakEnabled: false,
   speakModel: "whisper-large-v3-turbo",
@@ -283,7 +302,6 @@ export const DEFAULT_SETTINGS: Settings = {
   showWeather: true,
   showMiniPills: true,
   closeOnClickOutside: true,
-  openOnHover: false,
   autoHide: true,
   alwaysOnTop: true,
   showInTaskbar: false,
@@ -357,6 +375,10 @@ class AppState {
   private sessionDiffTimers = new Map<string, number>();
   /** Never reset, so an id can never point at a newer diff than the one tapped. */
   private nextDiffId = 0;
+  /** Ctrl+↑ / Ctrl+↓: the highlighted row of the card's list (AppState.cardSelection). */
+  cardSelection: number | null = null;
+  /** Rows in the list on screen, 0 when there is none (AppState.cardItemCount). */
+  cardItemCount = 0;
   /**
    * Mochi is out of the island — on the desktop, flying, or being dragged
    * there — so the island's own Mochi is hidden (AppState.mochiOnDesktop).
@@ -392,11 +414,24 @@ class AppState {
   /** Mochi is driving the PC with his blue pointer (src-tauri/src/computer.rs). */
   computerBusy = false;
 
+  /** How the PC feels (src-tauri/src/vitals.rs): Mochi sweats, puffs up or tires by it. */
+  vitals: MochiMood = CALM_MOOD;
+  /** Why, in a few words, shown while the pointer is on Mochi ("CPU 94 % · node, chrome"). */
+  vitalsSummary: string | null = null;
+
   get effectiveState(): BotStateName {
     const own = this.stateOverride ?? this.focusTask?.state ?? "idle";
     // A card waiting for an answer wins; otherwise he looks busy while his pointer works.
     if (this.computerBusy && (own === "idle" || own === "finished")) return "working";
     return own;
+  }
+
+  /**
+   * Music plays on this PC (the system media session, whatever the app) and Mochi may dance to it.
+   * Named after Louis's Spotify signal, which his dance rules (core/spotify.ts) read: here it is ours.
+   */
+  get spotifyPlaying(): boolean {
+    return this.settings.mochiDances && !!this.music?.active && !!this.music.playing;
   }
 
   get otherTasks(): AgentTask[] {

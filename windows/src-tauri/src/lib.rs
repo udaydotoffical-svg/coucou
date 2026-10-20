@@ -20,25 +20,31 @@ mod net;
 mod openai_compat;
 mod knowura;
 mod music;
+mod phone_link;
 mod pipe;
 mod privacy;
 mod platform;
+#[cfg(target_os = "linux")]
+mod portal;
 mod recap;
 mod secrets;
 mod session_window;
 mod settings;
 mod shortcuts;
+mod sounds;
 mod tray;
 mod weather;
 #[cfg(windows)]
 mod computer;
 #[cfg(windows)]
 mod speak;
+mod update;
+mod vitals;
 #[cfg(windows)]
 mod webview_drop;
 
 use std::process::Command;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -110,6 +116,17 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         // Where Mochi sits on the desktop is desktop.rs's to say, not a webview's.
         let mut settings = settings.clone();
         settings.desktop_mochi = current.desktop_mochi.clone();
+        // Same for the phone link: only its own commands turn it on or off.
+        settings.phone_link = current.phone_link;
+        settings.phone_chat = current.phone_chat;
+        settings.phone_details = current.phone_details;
+        settings.phone_answers = current.phone_answers;
+        settings.phone_diffs = current.phone_diffs;
+        settings.phone_usage = current.phone_usage;
+        settings.phone_services = current.phone_services.clone();
+        settings.phone_relay = current.phone_relay;
+        settings.phone_relay_url = current.phone_relay_url.clone();
+        settings.phone_chat_models = current.phone_chat_models.clone();
         *current = settings;
         (screen_changed, autostart_changed, shortcuts_changed, size_changed, on_top_changed, taskbar_changed, mode_changed)
     };
@@ -161,6 +178,27 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     }
     // Keep the other window in step (island ⇄ settings window).
     let _ = app.emit("settings-changed", settings);
+}
+
+/// The settings backups on this PC, newest first: (file name, Unix seconds).
+#[tauri::command]
+fn settings_backups() -> Vec<(String, u64)> {
+    settings::backups()
+}
+
+/// A backup's settings, for the window to review and save (save_settings applies them like any change).
+/// The one in force now is kept first.
+#[tauri::command]
+fn settings_backup_read(name: String) -> Option<Settings> {
+    let backup = settings::read_backup(&name)?;
+    settings::backup_current("before-restore");
+    Some(backup)
+}
+
+/// The island says whether Mochi is on screen: only then is the PC's load read (vitals.rs).
+#[tauri::command]
+fn vitals_active(app: AppHandle, on: bool) {
+    vitals::set_active(&app, on);
 }
 
 /// Mochi's computer use: runs a task (an empty one just closes the box).
@@ -262,8 +300,8 @@ fn set_system_languages(app: AppHandle, languages: Vec<String>) {
 /// settings window's title. The webviews switch on their own.
 fn language_changed(app: &AppHandle) {
     tray::retitle(app);
-    if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.set_title(&i18n::t("Settings — Coucou"));
+    if let Some(window) = app.get_webview_window(HUB_LABEL) {
+        let _ = window.set_title("Coucou");
     }
 }
 
@@ -305,6 +343,26 @@ fn reposition(app: AppHandle, shared: State<Shared>) {
     let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
     island::apply_geometry(&app, &pref, collapsed);
 }
+
+/// The panel is laid out in CSS px against the window's own scale. If the webview
+/// reports a different devicePixelRatio (it ends up bigger than the window and gets
+/// cut), correct its zoom so one CSS px is one logical px again.
+#[tauri::command]
+fn fit_zoom(app: AppHandle, dpr: f64) -> bool {
+    let Some(win) = island::window(&app) else { return false };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    static ZOOM: std::sync::Mutex<f64> = std::sync::Mutex::new(1.0);
+    let mut zoom = ZOOM.lock().unwrap();
+    if let Some(new_zoom) = island::calculate_zoom_correction(*zoom, scale, dpr) {
+        *zoom = new_zoom;
+        log::line(format!("webview dpr {dpr} != window scale {scale} — setting zoom {new_zoom:.3}"));
+        let _ = win.set_zoom(new_zoom);
+        true
+    } else {
+        false
+    }
+}
+
 
 /// The displays the island can be pinned to, for Settings.
 #[tauri::command]
@@ -354,17 +412,33 @@ fn open_in_vscode(path: Option<String>) -> bool {
 }
 
 /// "Open terminal": brings forward the terminal or editor window the session
-/// runs in, when it was found (Windows, see session_window.rs); otherwise opens
-/// the folder in VS Code, as before.
+/// runs in, when it was found (see session_window.rs); otherwise opens the
+/// folder in VS Code, as before.
 #[tauri::command]
 fn open_session(session_id: Option<String>, path: Option<String>) -> bool {
-    if let Some(owner) = session_id.as_deref().and_then(session_window::lookup) {
-        let folder = path.as_deref().map(session_window::folder_name).unwrap_or_default();
-        if platform::focus_process_window(owner, folder) {
+    let Some(owners) = session_id.as_deref().and_then(session_window::lookup) else {
+        return open_in_vscode(path);
+    };
+    let folder = path.as_deref().map(session_window::folder_name).unwrap_or_default().to_string();
+    #[cfg(windows)]
+    {
+        if platform::focus_session_window(&owners, &folder) {
             return true;
         }
+        open_in_vscode(path)
     }
-    open_in_vscode(path)
+    // Linux asks the display server, KWin or the terminal, which can take a
+    // moment: never on the UI thread a sync command runs on. VS Code still
+    // opens when none of them could bring the window forward.
+    #[cfg(target_os = "linux")]
+    {
+        std::thread::spawn(move || {
+            if !platform::focus_session_window(&owners, &folder) {
+                open_in_vscode(path);
+            }
+        });
+        true
+    }
 }
 
 /// The Claude Desktop pill's target: the Claude app (Windows only — it has no
@@ -701,53 +775,102 @@ fn settings_page_url(app: &AppHandle) -> WebviewUrl {
     WebviewUrl::App("settings.html".into())
 }
 
-/// The settings window is created hidden at launch and only ever shown and
+/// The Coucou window (Flow dictation, the Notetaker and every setting of the
+/// island), labelled "settings" since it grew out of the settings window.
+pub const HUB_LABEL: &str = "settings";
+
+/// The Coucou window is created hidden at launch and only ever shown and
 /// hidden afterwards. A WebView2 window created later — on the main thread or
 /// not — silently comes up blank in this app, so the window that works is the
 /// one that exists before the island's webview does.
 fn create_settings_window(app: &AppHandle) {
     let url = settings_page_url(app);
-    match WebviewWindowBuilder::new(app, "settings", url)
+    match WebviewWindowBuilder::new(app, HUB_LABEL, url)
         .additional_browser_args(BROWSER_ARGS)
-        .title(i18n::t("Settings — Coucou"))
-        .inner_size(560.0, 680.0)
-        .min_inner_size(460.0, 480.0)
+        .title("Coucou")
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(820.0, 560.0)
         .resizable(true)
         .visible(false)
         .center()
         .build()
     {
         Ok(win) => {
-            // Closing it must only hide it, or it could never be reopened.
-            let hidden = win.clone();
-            win.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            let this = win.clone();
+            win.on_window_event(move |event| match event {
+                // Closing it must only hide it, or it could never be reopened.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    let _ = hidden.hide();
+                    let _ = this.hide();
+                    set_hub_shown(&this, false);
                 }
+                // Minimised (a 0×0 resize on Windows) or back from it.
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(true) => {
+                    let on = this.is_visible().unwrap_or(false) && !this.is_minimized().unwrap_or(false);
+                    set_hub_shown(&this, on);
+                }
+                _ => {}
             });
         }
-        Err(err) => log::line(format!("settings window failed: {err}")),
+        Err(err) => log::line(format!("Coucou window failed: {err}")),
     }
 }
 
+/// Whether the Coucou window is on screen (shown and not minimised). Its page
+/// animates its canvases only then (hub/hero.ts): WebKitGTK can keep
+/// `document.visibilityState` at "visible" for a hidden window, and its
+/// animation loop then kept a core busy with the window closed (#792).
+static HUB_SHOWN: AtomicBool = AtomicBool::new(false);
+
+fn set_hub_shown(win: &tauri::WebviewWindow, shown: bool) {
+    if HUB_SHOWN.swap(shown, Ordering::Relaxed) != shown {
+        let _ = win.emit_to(HUB_LABEL, "hub-visible", shown);
+    }
+}
+
+/// The page asks once at load, in case it missed the event.
+#[tauri::command]
+fn hub_shown() -> bool {
+    HUB_SHOWN.load(Ordering::Relaxed)
+}
+
 pub fn show_settings_window(app: &AppHandle) {
-    let Some(win) = app.get_webview_window("settings") else {
-        log::line("settings window missing");
+    show_hub(app, Some("general"));
+}
+
+/// Shows the Coucou window, on `page` when given ("dictation", "notes",
+/// "settings", "general", "shortcuts"…).
+pub fn show_hub(app: &AppHandle, page: Option<&str>) {
+    let Some(win) = app.get_webview_window(HUB_LABEL) else {
+        log::line("Coucou window missing");
         return;
     };
+    if let Some(page) = page {
+        let _ = win.emit("hub-page", page.to_string());
+    }
     let _ = win.unminimize();
     let _ = win.show();
     let _ = win.set_focus();
+    set_hub_shown(&win, true);
+}
+
+/// The argument the login item starts Coucou with.
+const AUTOSTART_ARG: &str = "--autostart";
+
+/// Coucou started with the computer, not opened by the user: the window stays hidden.
+pub fn launched_at_login() -> bool {
+    std::env::args().any(|a| a == AUTOSTART_ARG)
 }
 
 #[tauri::command]
-fn open_settings_window(app: AppHandle) {
-    show_settings_window(&app);
+fn open_settings_window(app: AppHandle, page: Option<String>) {
+    show_hub(&app, Some(page.as_deref().unwrap_or("general")));
 }
 
 pub fn run() {
     platform::prepare_environment();
+    // Before anything reads or rewrites it: a copy of the settings the previous version left.
+    settings::backup_for_upgrade(env!("CARGO_PKG_VERSION"));
     let loaded = settings::load();
     i18n::set_picked(&loaded.language);
     let gate = Arc::new(PollGate::new());
@@ -763,12 +886,11 @@ pub fn run() {
             // settings run where we can't listen for keys ourselves (Wayland).
             match shortcuts::from_args(&argv) {
                 Some(action) => shortcuts::dispatch(app, action),
-                None => {
-                    let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
-                }
+                // Opening Coucou again (its shortcut, the Start menu) shows its window.
+                None => show_hub(app, None),
             }
         }))
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None));
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])));
     // Where no global shortcut can work, the plugin isn't even started.
     if platform::global_shortcuts_blocked().is_none() {
         builder = builder.plugin(shortcuts::plugin());
@@ -791,6 +913,9 @@ pub fn run() {
             set_collapsed,
             knowura_open,
             computer_start,
+            vitals_active,
+            settings_backups,
+            settings_backup_read,
             computer_stop,
             knowura_attach,
             knowura_sign_in_browser,
@@ -802,6 +927,8 @@ pub fn run() {
             set_island_rect,
             focus_window,
             reposition,
+            fit_zoom,
+            hub_shown,
             list_monitors,
             open_url,
             open_in_vscode,
@@ -840,6 +967,32 @@ pub fn run() {
             set_paused,
             shortcuts_status,
             shortcuts_suspend,
+            phone_link::phone_link_status,
+            phone_link::phone_link_set_enabled,
+            phone_link::phone_link_pairing,
+            phone_link::phone_link_new_pairing,
+            phone_link::phone_link_publish,
+            phone_link::phone_link_publish_question,
+            phone_link::phone_link_publish_prefs,
+            phone_link::phone_answers_status,
+            phone_link::phone_answers_set_enabled,
+            phone_link::phone_diffs_status,
+            phone_link::phone_diffs_set_enabled,
+            phone_link::phone_link_send_diff,
+            phone_link::phone_usage_status,
+            phone_link::phone_usage_set_enabled,
+            phone_link::phone_relay_status,
+            phone_link::phone_relay_set,
+            phone_link::phone_relay_set_access,
+            phone_link::phone_link_publish_usage,
+            phone_link::phone_services_status,
+            phone_link::phone_services_set,
+            phone_link::phone_link_publish_services,
+            phone_link::phone_details_status,
+            phone_link::phone_details_set_enabled,
+            phone_link::phone_chat_status,
+            phone_link::phone_chat_set_enabled,
+            phone_link::phone_chat_set_models,
             recap::recap_history,
             recap::recap_prefs,
             recap::recap_set_enabled,
@@ -858,13 +1011,27 @@ pub fn run() {
             desktop::desktop_mochi_fly_out,
             desktop::desktop_mochi_fly_home,
             desktop::desktop_mochi_set_asleep,
+            sounds::custom_sounds,
+            sounds::custom_sound,
+            sounds::reveal_sounds_folder,
+            sounds::reload_sounds,
+            update::update_status,
+            update::update_set_consent,
+            update::update_check,
+            update::update_shown,
+            update::update_show,
+            update::update_later,
+            update::update_dismiss,
+            update::update_install,
+            update::update_open_page,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            app.manage(phone_link::PhoneLink::new(handle.clone()));
             tray::build(&handle)?;
             // Before the island: see create_settings_window.
             create_settings_window(&handle);
-            // Same rule for Mochi's desktop window.
+            // Same rule for Mochi's desktop window and the dictation pill.
             desktop::setup(&handle);
 
             if let Some(win) = island::window(&handle) {
@@ -908,14 +1075,28 @@ pub fn run() {
             music::start(handle.clone());
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
+            phone_link::start_if_enabled(&handle);
             integrations::start(handle.clone());
             shortcuts::apply(&handle, &loaded.shortcuts);
             #[cfg(windows)]
             speak::apply(&handle);
+            // New versions: nothing goes to GitHub until the user agrees (update.rs).
+            update::start(handle.clone());
+            if loaded.autostart {
+                // Login items written before 0.5 start Coucou without --autostart:
+                // writing it again adds it, so the window stays hidden at login.
+                let _ = handle.autolaunch().enable();
+            }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Coucou");
+        .build(tauri::generate_context!())
+        .expect("error while building Coucou")
+        .run(|app, event| {
+            // Withdraw the phone link's announcement on the local network before the process ends.
+            if let tauri::RunEvent::Exit = event {
+                phone_link::stop_on_exit(app);
+            }
+        });
 }
 
 #[cfg(test)]

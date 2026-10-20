@@ -160,8 +160,14 @@ pub async fn send(
     Ok(ChatReply { text })
 }
 
+
+
 async fn call(endpoint: &Url, key: &str, body: &Value) -> Result<Value, String> {
-    let response = net::client(endpoint, Duration::from_secs(90))?
+    call_with_timeout(endpoint, key, body, Duration::from_secs(90)).await
+}
+
+async fn call_with_timeout(endpoint: &Url, key: &str, body: &Value, timeout: Duration) -> Result<Value, String> {
+    let response = net::client(endpoint, timeout)?
         .post(endpoint.clone())
         .header("x-api-key", key)
         .header("anthropic-version", ANTHROPIC_VERSION)

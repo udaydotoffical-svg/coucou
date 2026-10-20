@@ -178,7 +178,7 @@ export function startWeather() {
 // ── The tab ───────────────────────────────────────────────────────────────────
 
 const weekday = (iso: string, i: number): string => {
-  if (i === 0) return "Today";
+  if (i === 0) return t("Today");
   const d = new Date(`${iso}T12:00:00`);
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { weekday: "short" });
 };

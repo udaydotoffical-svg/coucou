@@ -6,7 +6,7 @@ import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, KNOWURA_RADIUS, NOTCH_H, NOTCH_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
-  islandSize, panelSize,
+  islandSize, panelSize, PANEL_W,
   QUESTION_PICKER_H,
   type BotEmoteName, type IslandMode, type IslandViewName,
 } from "../core/layout";
@@ -14,7 +14,8 @@ import { Sound } from "../core/sound";
 import { dominantColor, DEFAULT_COLOR } from "../core/color";
 import { degrees, weatherIcon, weatherLabel } from "../views/weather";
 import { State, type MusicInfo } from "../core/state";
-import { BotEngine, hexToRGB } from "../mochi/engine";
+import { SPOTIFY_ID, islandDances } from "../core/spotify";
+import { BotEngine, CALM_MOOD, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
 import { SeasonCache, parseOutfit } from "../mochi/wardrobe";
@@ -27,6 +28,7 @@ import { ICONS } from "../views/icons";
 import { IslandStateMachine } from "./fsm";
 import { refreshHookPills } from "./integrations";
 import { DesktopLink } from "./desktop";
+import type { ViewCommand } from "./shortcuts";
 import { DRAG_THRESHOLD } from "../mochi/desktop-logic";
 
 const BOT_OVERHANG = 40;
@@ -43,16 +45,6 @@ const PRE_PROGRESS = USC.T_PROG_START - USC.T_DROP;
 
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
 
-/** Music is playing on this PC (Windows' media session). */
-function musicPlaying(): boolean {
-  return !!State.music?.active && !!State.music.playing;
-}
-
-/** The dance only happens when he has nothing else to show (the Mac's rule). */
-function danceableState(s: string): boolean {
-  return s === "idle" || s === "working" || s === "thinking" || s === "searching" || s === "finished";
-}
-
 export class Island {
   readonly fsm = new IslandStateMachine();
   /** Mochi on the desktop: his life cycle and the drag out of the island. */
@@ -67,6 +59,8 @@ export class Island {
   private botGlow!: HTMLElement;
   private greetingCanvas!: HTMLCanvasElement;
   private miniGrid!: HTMLElement;
+  private clockEl!: HTMLElement;
+  private clockTimer?: number;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
   private knowuraLoading!: HTMLElement;
@@ -113,6 +107,8 @@ export class Island {
   private confusedRecovery: number | null = null;
   private prevViewBeforeConfused: IslandViewName = "overview";
   private lastSyncedView: IslandViewName | null = null;
+  /** The PC's load is being read for him (Bridge.vitalsActive). */
+  private feeling = false;
 
   /** The launch greeting ended, or the island came out of hidden — two of the
    *  moments the Monday recap may open (see src/recap/recap.ts). */
@@ -121,6 +117,9 @@ export class Island {
 
   /** Where a press on Mochi started: moving past DRAG_THRESHOLD drags him out. */
   private botPress: { x: number; y: number } | null = null;
+
+  /** The next reveal from hidden makes no peek (music starting, as on macOS). */
+  private silentReveal = false;
 
   /** Drop sequence bookkeeping: last tick played, and whether the ✓ has fired. */
   private uploadTens = 0;
@@ -204,6 +203,7 @@ export class Island {
         else if (task.id === "integration_claude" || task.sessionId) {
           void Bridge.openSession(task.sessionId ?? null, task.sessionCwd ?? null);
         } else if (task.id === "integration_n8n") void Bridge.openN8n();
+        else if (task.id === SPOTIFY_ID) void Bridge.spotifyOpen();
         else if (urls[task.id]) void Bridge.openUrl(urls[task.id]);
       },
       openUrl: (url) => {
@@ -271,6 +271,7 @@ export class Island {
     this.botCanvas = h("canvas", { id: "bot-canvas" });
     this.greetingCanvas = h("canvas", { id: "greeting-canvas" });
     this.miniGrid = h("div", { id: "mini-grid" });
+    this.clockEl = h("div", { id: "island-clock" });
     this.countdown = h("div", { id: "countdown" });
     this.knowuraLoading = h("div", { id: "knowura-loading" }, h("i"), h("i"), h("i"));
     // No cover (yet): a music note stands in for it.
@@ -310,6 +311,7 @@ export class Island {
       this.botGlow,
       this.botCanvas,
       this.miniGrid,
+      this.clockEl,
       this.countdown,
       this.knowuraLoading,
       this.musicArt,
@@ -348,7 +350,7 @@ export class Island {
           break;
         case "petit":
           if (from === "coucou") this.greeting.interrupt();
-          else if (from === "hidden") Sound.play("peek");
+          else if (from === "hidden" && !this.silentReveal) Sound.play("peek");
           this.setMode("compact");
           if (from === "coucou") State.view = State.defaultView();
           if (!this.wasInIsland) this.fsm.mouseLeft(false);
@@ -574,6 +576,13 @@ export class Island {
     this.fsm.reveal();
   }
 
+  /** Music started playing: the compact island, without the peek sound (musicReveal). */
+  revealSilently() {
+    this.silentReveal = true;
+    this.fsm.reveal();
+    this.silentReveal = false;
+  }
+
   /** Right-click on Mochi: wardrobe open ↔ back to the usual view. */
   toggleWardrobe() {
     if (State.paused || State.mode === "hidden") return;
@@ -636,6 +645,25 @@ export class Island {
    *  It gives it back when it closes, or when the chat is left. */
   takeKeyboard() {
     void Bridge.focusWindow(true);
+  }
+
+  /** The desktop shortcut needs a desktop Mochi: none on GNOME's Wayland. */
+  canLeaveIsland(): boolean {
+    return this.desktop.supported;
+  }
+
+  /** The desktop shortcut (macOS DesktopMochiController.flyOutOrHome). */
+  flyOutOrHome() {
+    // The greeting and the drop sequence draw a Mochi of their own: he stays
+    // for them, as he does for a drag (canDragOut).
+    const busy = State.mode === "expanded" && (State.view === "greeting" || this.uploadActive);
+    if (busy && !State.mochiOnDesktop) return;
+    this.desktop.flyOutOrHome();
+  }
+
+  /** Ctrl+O / Ctrl+E go to the view on screen. */
+  viewCommand(command: ViewCommand) {
+    this.views.get(State.view)?.command?.(command);
   }
 
   // ── File drop ───────────────────────────────────────────────────────────────
@@ -828,8 +856,10 @@ export class Island {
     this.privacyDot.style.top = `${Math.min(hh, 34 * dc) / 2 - 3.5 * dc}px`;
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
+    this.clockEl.style.height = `${hh}px`;
 
-    const rect = { x: (this.panel.w - w) / 2, y: 0, w, h: hh };
+    const viewportW = window.innerWidth > 0 ? window.innerWidth : PANEL_W;
+    const rect = { x: (viewportW - w) / 2, y: 0, w, h: hh };
     const p = this.pushedRect;
     if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
@@ -841,12 +871,8 @@ export class Island {
   private islandRect(): { x: number; y: number; w: number; h: number } {
     const w = this.width.value;
     const hh = this.height.value;
-    return { x: (this.panel.w - w) / 2, y: 0, w, h: hh };
-  }
-
-  /** The window's logical size, which follows the island size in the settings. */
-  private get panel() {
-    return panelSize(State.settings);
+    const viewportW = window.innerWidth > 0 ? window.innerWidth : PANEL_W;
+    return { x: (viewportW - w) / 2, y: 0, w, h: hh };
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ────────────────
@@ -886,6 +912,8 @@ export class Island {
       Sound.resume();
       State.lastActivity = performance.now();
       if (State.knowuraOpen) return;
+      // A click makes a hover-opened island an ordinary open one.
+      this.fsm.userInteracted();
       // A press on Mochi may become a drag out to the desktop.
       if (e.button === 0 && this.isBotHit(e.clientX, e.clientY)) {
         this.botPress = { x: e.clientX, y: e.clientY };
@@ -998,14 +1026,18 @@ export class Island {
       x >= rect.x - HIT_MARGIN && x <= rect.x + rect.w + HIT_MARGIN &&
       y >= rect.y - HIT_MARGIN && y <= rect.y + rect.h + HIT_MARGIN;
 
-    if (inIsland && !this.wasInIsland) {
+    // Recorded before the state machine hears of it: a transition it makes
+    // right away (open on hover) reads where the pointer is, and must not see
+    // the pointer as still outside.
+    const wasIn = this.wasInIsland;
+    this.wasInIsland = inIsland;
+    if (inIsland && !wasIn) {
       if (this.fsm.state === "coucou") this.greeting.hover();
       this.fsm.mouseEntered();
     }
-    if (!inIsland && this.wasInIsland) {
+    if (!inIsland && wasIn) {
       this.fsm.mouseLeft();
     }
-    this.wasInIsland = inIsland;
 
     // Bot hover → love
     const overBot = State.mode === "expanded" && State.stateOverride == null && this.isBotHit(x, y);
@@ -1187,6 +1219,14 @@ export class Island {
     this.botCy.target = p.cy;
     this.botSize.target = p.diameter / 0.6;
 
+    // The PC's load is read only while he is on screen, and only if he is to react to it.
+    const feeling = State.settings.mochiFeelsPc && (State.mode !== "hidden" || State.mochiOnDesktop);
+    if (feeling !== this.feeling) {
+      this.feeling = feeling;
+      void Bridge.vitalsActive(feeling);
+    }
+    this.botCanvas.title = feeling && State.vitalsSummary ? State.vitalsSummary : "";
+
     const greetingActive = State.mode === "expanded" && State.view === "greeting";
     // The drop canvas draws its own Mochi; two of them would overlap. Out on the
     // desktop, he isn't here at all.
@@ -1251,7 +1291,6 @@ export class Island {
     this.engine.headphones =
       State.settings.mochiHeadphones && !!State.music?.active && !!State.music.playing;
     this.engine.phoneAccent = State.musicColor;
-    this.engine.dancing = State.settings.mochiDances && musicPlaying() && danceableState(State.effectiveState);
     // Only the main Mochi is dressed — the one of the main tool's pill (Settings →
     // Active pills): a focused integration pill shows its own colours, unless
     // the wardrobe is open (BotCanvasView.showOutfit, macOS).
@@ -1261,11 +1300,25 @@ export class Island {
     const showOutfit = mainFocused || State.mode !== "expanded" || inWardrobe;
     const outfit = State.wardrobePreview ?? this.seasons.get(parseOutfit(State.settings.mochiOutfit));
     this.engine.setOutfit(showOutfit ? outfit : "none", !inWardrobe);
+    this.engine.moodTarget = State.settings.mochiFeelsPc ? State.vitals : CALM_MOOD;
+    // Dances while music plays: always in the compact island, expanded only on
+    // the music pill's card (BotCanvasView, macOS). Asked every frame.
+    this.engine.setDancing(islandDances({
+      music: State.spotifyPlaying,
+      state: State.effectiveState,
+      mode: State.mode,
+      view: State.view,
+      // Our music player is the overview's "music pill" card: he dances there too.
+      focusId: State.music?.active ? SPOTIFY_ID : State.focusTask?.id,
+    }));
 
     this.engine.update(dt);
     ctx.setTransform(dpr, 0, 0, dpr, BOT_SIDE * dpr, 0);
     ctx.clearRect(-BOT_SIDE, 0, wCss, hCss);
+    ctx.save();
+    this.engine.applyDance(ctx, w, hCss);
     this.engine.draw(ctx, w, hCss);
+    ctx.restore();
   }
 
   /** BotCanvasView.lookX / lookY — tanh of the distance to the bot. */
@@ -1391,8 +1444,22 @@ export class Island {
       }
     }
 
+    this.updateClock();
+
     syncMiniBotStates(State.tasks);
     this.engine.setState(State.effectiveState);
+  }
+
+  /** The clock sits in the middle of the compact island, where the notch is on a Mac. */
+  private updateClock() {
+    const on = State.mode === "compact" && State.settings.showClock;
+    this.clockEl.style.opacity = on ? "1" : "0";
+    if (!on) return;
+    const now = new Date();
+    const date = now.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+    const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const text = `${date}  ${time}`;
+    if (this.clockEl.textContent !== text) this.clockEl.textContent = text;
   }
 
   /** Applies settings coming from Rust at boot. */
@@ -1405,10 +1472,18 @@ export class Island {
     // The island size is a setting: follow it without waiting for the next view change.
     this.animateGeometry(false);
     State.notify();
+    // ponytail: one timer for the life of the window; a minute is the clock's finest tick.
+    this.clockTimer ??= window.setInterval(() => this.updateClock(), 10_000);
+  }
+
+  /** Plugged in while tired: he wakes up and is glad of it. */
+  vitalsWoke() {
+    this.engine.triggerEmote("happy", 1.8);
+    Sound.play("pop");
   }
 
   get panelSize() {
-    return this.panel;
+    return panelSize(State.settings);
   }
 
   get chatHeight() {

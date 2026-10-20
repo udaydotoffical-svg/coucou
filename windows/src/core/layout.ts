@@ -26,7 +26,8 @@ export type IslandViewName =
   | "weather"
   | "recap"
   | "wardrobe"
-  | "agent";
+  | "agent"
+  | "update";
 
 export type BotStateName =
   | "idle"
@@ -144,6 +145,8 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   recap: { height: 184, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   wardrobe: { height: 160, botX: 68, botY: null, botDiameter: 58, agentMode: "none" },
   agent: { height: AGENT_ISLAND_H, botX: 44, botY: 42, botDiameter: 40, agentMode: "none" },
+  // New version: Mochi on the left, the version and Update now (Mac: .update).
+  update: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "none" },
 };
 
 /** The overview is taller while the music player is in it. */

@@ -1,5 +1,7 @@
 // Notification-area icon: Open, Weekly recap, Wardrobe, Settings, Pause, Quit — plus, on Windows,
-// the Knowura entries (text box, voice, full app) while Knowura mode is on, and "Start with Windows".
+// the Knowura entries (text box, voice, full app) while Knowura mode is on, the computer-use entries
+// while it is on, and "Start with Windows". "Update Coucou to X…" shows under Open only while a new
+// version is out (update.rs).
 
 use std::sync::Mutex;
 
@@ -7,7 +9,7 @@ use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem}
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
-use crate::i18n::{n_, t};
+use crate::i18n::{n_, t, tf};
 use crate::island::WINDOW_LABEL;
 use crate::knowura::{self, Mode};
 
@@ -27,7 +29,19 @@ const ITEMS: [(&str, &str); 6] = [
 /// Kept so a language change relabels the menu without rebuilding the tray.
 struct Items(Mutex<Vec<(&'static str, MenuItem<Wry>)>>);
 
-/// What the menu depends on in the settings: Knowura mode, and starting with Windows.
+/// "Update Coucou to X…": in the menu only while `version` is set. The menu is rebuilt when a setting
+/// changes (`refresh`), so the one it belongs to is kept up to date here.
+struct UpdateItem {
+    menu: Mutex<Menu<Wry>>,
+    item: MenuItem<Wry>,
+    version: Mutex<Option<String>>,
+}
+
+fn update_label(version: &str) -> String {
+    tf("Update Coucou to {version}…", &[("version", version)])
+}
+
+/// What the menu depends on in the settings: Knowura mode, starting with Windows, computer use.
 fn wanted(app: &AppHandle) -> (bool, bool, bool) {
     app.try_state::<crate::Shared>()
         .map(|s| {
@@ -72,7 +86,32 @@ fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             app.manage(Items(Mutex::new(items)));
         }
     }
+    // The update entry belongs to whichever menu is current: put it back under Open when one is out.
+    match app.try_state::<UpdateItem>() {
+        Some(update) => {
+            let version = update.version.lock().unwrap().clone();
+            *update.menu.lock().unwrap() = menu.clone();
+            if let Some(v) = version {
+                let _ = update.item.set_text(update_label(&v));
+                let _ = menu.insert(&update.item, update_index(&menu));
+            }
+        }
+        None => {
+            // Its click goes to the island like the others (id "update"): it opens the update card.
+            let item = MenuItem::with_id(app, "update", "", true, None::<&str>)?;
+            app.manage(UpdateItem { menu: Mutex::new(menu.clone()), item, version: Mutex::new(None) });
+        }
+    }
     Ok(menu)
+}
+
+/// Right under "Open Coucou", wherever the Knowura and computer-use entries put it.
+fn update_index(menu: &Menu<Wry>) -> usize {
+    menu.items()
+        .ok()
+        .and_then(|items| items.iter().position(|i| i.id().as_ref() == "open"))
+        .map(|i| i + 1)
+        .unwrap_or(1)
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
@@ -116,5 +155,39 @@ pub fn retitle(app: &AppHandle) {
     let Some(items) = app.try_state::<Items>() else { return };
     for (label, item) in items.0.lock().unwrap().iter() {
         let _ = item.set_text(t(label));
+    }
+    if let Some(update) = app.try_state::<UpdateItem>() {
+        // Copied out first: the menu calls wait for the main thread, never under the lock.
+        let version = update.version.lock().unwrap().clone();
+        if let Some(version) = version {
+            let _ = update.item.set_text(update_label(&version));
+        }
+    }
+}
+
+/// Shows "Update Coucou to `version`…" right under Open, or takes it out (None).
+pub fn set_update(app: &AppHandle, version: Option<&str>) {
+    let Some(update) = app.try_state::<UpdateItem>() else { return };
+    let was_shown = {
+        let mut shown = update.version.lock().unwrap();
+        if shown.as_deref() == version {
+            return;
+        }
+        let was = shown.is_some();
+        *shown = version.map(str::to_string);
+        was
+    };
+    match version {
+        Some(v) => {
+            let _ = update.item.set_text(update_label(v));
+            if !was_shown {
+                let menu = update.menu.lock().unwrap().clone();
+                let _ = menu.insert(&update.item, update_index(&menu));
+            }
+        }
+        None => {
+            let menu = update.menu.lock().unwrap().clone();
+            let _ = menu.remove(&update.item);
+        }
     }
 }

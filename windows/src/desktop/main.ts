@@ -10,7 +10,7 @@
 import { Bridge, emitToWindow, onEvent, type DesktopMode } from "../core/bridge";
 import type { BotEmoteName } from "../core/layout";
 import { Sound } from "../core/sound";
-import { BotEngine } from "../mochi/engine";
+import { BotEngine, CALM_MOOD } from "../mochi/engine";
 import {
   DESKTOP_EVENTS, DOUBLE_CLICK_MS, DRAG_THRESHOLD, PANEL_SIZE, agentActive, gaze, isOverBody,
   layerDragTopLeft, lookOrigin, pointerDistance, shouldSleep, windowDragTopLeft,
@@ -36,7 +36,7 @@ class DesktopMochi {
   private mode: DesktopMode = "off";
 
   private snap: DesktopSnapshot = {
-    state: "idle", outfit: "none", soundEnabled: true, soundVolume: 0.12, paused: false,
+    state: "idle", outfit: "none", soundEnabled: true, soundVolume: 0.12, paused: false, dancing: false,
   };
 
   private visible = false;
@@ -136,6 +136,8 @@ class DesktopMochi {
 
   private updateSleep(now: number) {
     if (!this.visible) return;
+    // Dancing keeps him up: asleep he would bounce at a few frames a second.
+    if (this.snap.dancing && !this.snap.paused) this.lastAgentActive = now;
     const distance = pointerDistance(this.mode === "poll", this.cursor, now - this.lastPointer);
     const sleep =
       !this.dragging &&
@@ -204,16 +206,21 @@ class DesktopMochi {
       engine.lookX = g.lookX;
       engine.lookY = g.lookY;
     }
-    // Music is playing on this PC: his headphones, and the dance (the island tells us).
+    // Music is playing on this PC: his headphones, in the cover's colour; he dances by the Mac's rules.
     const music = this.snap.music;
     engine.headphones = !!music?.headphones;
     engine.phoneAccent = music?.accent ?? null;
-    engine.dancing = !!music?.dancing && !this.asleep;
+    // Dances while Spotify plays, by the compact island's rules.
+    engine.setDancing(this.snap.dancing && !this.asleep);
+    engine.moodTarget = this.snap.mood ?? CALM_MOOD;
     engine.update(dt);
     const dpr = this.dpr();
     ctx.setTransform(dpr, 0, 0, dpr, SIDE * dpr, 0);
     ctx.clearRect(-SIDE, 0, PANEL_SIZE, PANEL_SIZE);
+    ctx.save();
+    engine.applyDance(ctx, DRAW_W, PANEL_SIZE);
     engine.draw(ctx, DRAW_W, PANEL_SIZE);
+    ctx.restore();
   }
 
   private dpr(): number {

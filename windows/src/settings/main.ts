@@ -1,6 +1,7 @@
-// Settings window — the place where anything that writes to disk is confirmed.
-// Stage 2 covers the Claude Code hooks and the general preferences; API keys and
-// integrations land here too in a later stage.
+// The Coucou window (settings.html): Flow dictation, the Notetaker and, under
+// Notch, every setting of the island — the place where anything that writes to
+// disk is confirmed. The window's frame and the Flow pages live in ../hub; the
+// island's settings are drawn here, one Notch page at a time.
 
 import "./settings.css";
 import { Bridge, onEvent, type HookPreview, type HookStatus, type ShortcutsReport } from "../core/bridge";
@@ -10,13 +11,18 @@ import {
   recordPress, type Binding,
 } from "../core/shortcuts";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import type { UpdateStatus } from "../core/update";
+import { SOUND_NAMES } from "../core/sound";
 import {
   MAX_DECLARED, PILL_CATEGORIES, availablePills, chooseMainPill, isComingSoon, mainPillChoices,
   sanitizeDeclared, toggleDeclared, type PillDefinition,
 } from "../core/pills";
-import { COMPACT_HEIGHT_MAX, COMPACT_HEIGHT_MIN, ISLAND_HEIGHT_EXTRA_MAX, ISLAND_HEIGHT_EXTRA_MIN, ISLAND_WIDTH_MAX, ISLAND_WIDTH_MIN } from "../core/layout";
 import { h, clear } from "../views/dom";
+import { startHub, type PageId } from "../hub/shell";
 import { agentsSection } from "./agents";
+import { phoneSection } from "./phone";
+import { updateRows, updatesListener } from "./updates";
+import { assistantSection, backupSection, bindOurs, computerSection, islandSection, layoutSection, speakSection, weatherSection } from "./ours";
 import { colorDot } from "./colors";
 import { renderDiff, statusDot } from "./parts";
 import {
@@ -30,12 +36,19 @@ const KEY_STORE = navigator.userAgent.includes("Windows")
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let version = "";
+/** The combo that opens Knowura's text box, when Knowura mode is on. */
+let knowuraHotkey: string | null = null;
 
-const root = document.getElementById("settings-root")!;
+const windowRoot = document.getElementById("hub")!;
+/** Where the Notch page being shown draws its sections. */
+let root: HTMLElement = windowRoot;
+let hub: { redraw(): void; current(): PageId } | null = null;
 
 async function save() {
   await Bridge.saveSettings(settings);
 }
+// Our sections (ours.ts) read and save the same settings.
+bindOurs({ settings: () => settings, save }, () => hub?.redraw());
 
 /** A colour was picked for a pill's Mochi (see ./colors.ts): the island follows. */
 function pickColor(next: Record<string, string>) {
@@ -238,6 +251,7 @@ function claudeSection(status: HookStatus): HTMLElement {
  */
 const PLAN_SETTINGS_TEXT = {
   get claude() { return t("Shows your Claude plan usage (5-hour and weekly limits) in the island's header. Coucou adds a status line relay in ~/.claude/settings.json. If you already have a status line, it keeps working as before. Pro and Max plans only."); },
+  get claudeCli() { return t("The numbers come from the Claude Code command-line tool. The Claude desktop app does not report them, so the gauge stays empty if you only use the desktop app."); },
   get showClaude() { return t("Show in notch"); },
   get codex() { return t("Shows your Codex plan usage (weekly limit and free resets left) in the island's header. Coucou asks the Codex CLI (codex app-server) when the pill shows; nothing is installed. Codex must be signed in with ChatGPT."); },
   get showCodex() { return t("Show Codex plan in the notch"); },
@@ -283,6 +297,7 @@ function planSection(status: HookStatus): HTMLElement {
         class: "hint",
         text: PLAN_SETTINGS_TEXT.claude,
       }),
+      h("div", { class: "hint", text: PLAN_SETTINGS_TEXT.claudeCli }),
       h("div", { class: "row" }, h("label", { text: PLAN_SETTINGS_TEXT.showClaude }), sw),
       h("div", { class: "row" },
         h("label", { text: t("Relay") }),
@@ -400,435 +415,6 @@ function apiSection(hasKey: boolean): HTMLElement {
 }
 
 // ── Active pills section ──────────────────────────────────────────────────────
-
-/** A range input with a live value label; `onChange` fires on release, not on every pixel. */
-function slider(
-  min: number,
-  max: number,
-  step: number,
-  value: number,
-  format: (v: number) => string,
-  onChange: (v: number) => void,
-) {
-  const input = h("input", {
-    type: "range", min: String(min), max: String(max), step: String(step), value: String(value),
-    style: "flex:1 1 auto;min-width:0",
-  }) as HTMLInputElement;
-  const label = h("span", { class: "hint", style: "min-width:64px;text-align:right", text: format(value) });
-  input.addEventListener("input", () => { label.textContent = format(Number(input.value)); });
-  input.addEventListener("change", () => onChange(Number(input.value)));
-  return {
-    el: h("div", { class: "row", style: "flex:1 1 auto;min-width:0" }, input, label),
-    set(v: number) {
-      input.value = String(v);
-      label.textContent = format(v);
-    },
-  };
-}
-
-/** A password field with Save / Remove, bound to one Credential Manager entry. */
-function keyRow(secretKey: string, placeholder: string, emptyHint: string) {
-  const dot = statusDot(false);
-  const state = h("span", { class: "hint" });
-  const field = h("input", {
-    type: "password",
-    style: "flex:1 1 auto;min-width:0",
-    autocomplete: "off",
-    spellcheck: "false",
-  }) as HTMLInputElement;
-  const saveBtn = h("button", { class: "primary", text: t("Save key") });
-  const clearBtn = h("button", { class: "danger", text: t("Remove") });
-  const feedback = h("div", {});
-
-  async function refresh() {
-    const present = (await Bridge.secretPresent(secretKey)) ?? false;
-    dot.style.background = present ? "#22c55e" : "#f4505e";
-    state.textContent = present ? "Key saved in the Windows Credential Manager." : emptyHint;
-    field.placeholder = present ? "••••••••••••  (stored)" : placeholder;
-    clearBtn.style.display = present ? "" : "none";
-  }
-
-  saveBtn.addEventListener("click", async () => {
-    const value = field.value.trim();
-    if (!value) return;
-    clear(feedback);
-    try {
-      await Bridge.secretSet(secretKey, value);
-      field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: t("Saved. It never touches disk.") }));
-      await refresh();
-    } catch (err) {
-      feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
-    }
-  });
-
-  clearBtn.addEventListener("click", async () => {
-    clear(feedback);
-    try {
-      await Bridge.secretClear(secretKey);
-      feedback.append(h("div", { class: "notice ok", text: t("Key removed.") }));
-      await refresh();
-    } catch (err) {
-      feedback.append(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
-    }
-  });
-
-  void refresh();
-  return {
-    dot,
-    state,
-    row: h("div", { class: "row" }, h("label", { text: t("API key") }), field, saveBtn, clearBtn),
-    feedback,
-  };
-}
-
-// ── Assistant (Mochi / Knowura) section ───────────────────────────────────────
-
-function assistantSection(hotkey: string | null): HTMLElement {
-  const mode = h("select", {}) as HTMLSelectElement;
-  mode.append(
-    h("option", { value: "knowura", text: "Knowura (hosted assistant)" }),
-    h("option", { value: "mochi", text: "Mochi (built-in chat)" }),
-  );
-  mode.value = settings.assistantMode;
-
-  const keyText = hotkey ?? "Alt+Space";
-  const knowuraOnly = h("div", { style: "display:flex;flex-direction:column;gap:12px" },
-    h("div", {
-      class: "hint",
-      text: `The chat tab opens the Knowura assistant — chat, live voice, attachments and quizzes, signed in once and kept. ` +
-        `${keyText} opens the text box from anywhere (and closes it again). There is no voice shortcut: use the mic button in the panel, or Start voice in the tray menu.`,
-    }),
-    h("div", { class: "row" },
-      h("button", { class: "primary", text: "Open text box", onclick: () => void Bridge.knowuraOpen("text") }),
-      h("button", { text: "Start voice", onclick: () => void Bridge.knowuraOpen("voice") }),
-      h("button", { text: "Sign in with the browser", onclick: () => void Bridge.knowuraSignInBrowser() }),
-    ),
-    h("div", { class: "hint", text: "Signing in works two ways: inside the app (Google opens in its own window), or in your browser with the button above — the app then picks your account up by itself once Knowura supports it." }),
-  );
-  const mochiOnly = h("div", { class: "hint", text: "Mochi's own chat. Pick the provider and the model in the chat view." });
-
-  const show = () => {
-    const knowura = mode.value === "knowura";
-    knowuraOnly.style.display = knowura ? "" : "none";
-    mochiOnly.style.display = knowura ? "none" : "";
-  };
-  mode.addEventListener("change", () => {
-    settings.assistantMode = mode.value as Settings["assistantMode"];
-    show();
-    void save();
-  });
-  show();
-
-  return h(
-    "section",
-    {},
-    h("h2", {}, h("span", { text: "Assistant" })),
-    h("div", { class: "row" }, h("label", { text: "Chat mode" }), mode),
-    knowuraOnly,
-    mochiOnly,
-  );
-}
-
-// ── Overview layout section ───────────────────────────────────────────────────
-
-function layoutSection(): HTMLElement {
-  // The pills that can fill a spot: the main one and the integrations that are switched on.
-  const ids = [settings.mainPill, ...settings.activeIntegrations];
-  const candidates = availablePills().filter((p) => ids.includes(p.id));
-  const picker = (value: string, autoLabel: string, onPick: (id: string) => void) => {
-    const sel = h("select", {}) as HTMLSelectElement;
-    sel.append(h("option", { value: "", text: autoLabel }));
-    for (const p of candidates) sel.append(h("option", { value: p.id, text: p.id === "integration_claude" ? "Claude" : p.name }));
-    sel.value = candidates.some((p) => p.id === value) ? value : "";
-    sel.addEventListener("change", () => onPick(sel.value));
-    return sel;
-  };
-
-  const slots = [settings.squareSlots[0] ?? "", settings.squareSlots[1] ?? ""];
-  const setSlot = (i: number, id: string) => {
-    slots[i] = id;
-    settings.squareSlots = [...slots];
-    void save();
-  };
-
-  return h(
-    "section",
-    {},
-    h("h2", {}, h("span", { text: "Overview layout" })),
-    h("div", { class: "hint", text: "The big avatar on the left, the two small squares for the other avatars on the right, and the music player under them. Clicking a square swaps it with the big one." }),
-    h("div", { class: "row" },
-      h("label", { text: "Square 1" }),
-      picker(slots[0], "Automatic", (id) => setSlot(0, id)),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Square 2" }),
-      picker(slots[1], "Automatic", (id) => setSlot(1, id)),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Album art on closed island" }),
-      toggle(settings.showMusicOnNotch, (v) => { settings.showMusicOnNotch = v; void save(); }),
-      h("span", { class: "hint", text: "While music plays, the art replaces the small pills on the closed island" }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Headphones on Mochi" }),
-      toggle(settings.mochiHeadphones, (v) => { settings.mochiHeadphones = v; void save(); }),
-      h("span", { class: "hint", text: "Mochi puts headphones on while music plays" }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Mochi dances to music" }),
-      toggle(settings.mochiDances, (v) => { settings.mochiDances = v; void save(); }),
-      h("span", { class: "hint", text: "He hops and sways to the beat while music plays" }),
-    ),
-  );
-}
-
-// ── Island section: behaviour and size ────────────────────────────────────────
-
-function islandSection(): HTMLElement {
-  const width = slider(ISLAND_WIDTH_MIN, ISLAND_WIDTH_MAX, 10, settings.islandWidth, (v) => `${v}px`, (v) => {
-    settings.islandWidth = v;
-    void save();
-  });
-  const heightExtra = slider(ISLAND_HEIGHT_EXTRA_MIN, ISLAND_HEIGHT_EXTRA_MAX, 10, settings.islandHeightExtra, (v) => (v === 0 ? "default" : v > 0 ? `+${v}px` : `${v}px`), (v) => {
-    settings.islandHeightExtra = v;
-    void save();
-  });
-  const compactHeight = slider(COMPACT_HEIGHT_MIN, COMPACT_HEIGHT_MAX, 2, settings.compactHeight, (v) => (v === 32 ? "default" : `${v}px`), (v) => {
-    settings.compactHeight = v;
-    void save();
-  });
-  const resetSize = h("button", {
-    text: "Reset size",
-    onclick: () => {
-      settings.islandWidth = DEFAULT_SETTINGS.islandWidth;
-      settings.islandHeightExtra = DEFAULT_SETTINGS.islandHeightExtra;
-      settings.compactHeight = DEFAULT_SETTINGS.compactHeight;
-      compactHeight.set(settings.compactHeight);
-      width.set(settings.islandWidth);
-      heightExtra.set(settings.islandHeightExtra);
-      void save();
-    },
-  });
-
-  return h(
-    "section",
-    {},
-    h("h2", {}, h("span", { text: "Island" })),
-    h("div", { class: "row" },
-      h("label", { text: "Open on hover" }),
-      toggle(settings.openOnHover, (v) => { settings.openOnHover = v; void save(); }),
-      h("span", { class: "hint", text: "Opens when the pointer rests on the island, closes when it leaves" }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Close on click outside" }),
-      toggle(settings.closeOnClickOutside, (v) => { settings.closeOnClickOutside = v; void save(); }),
-      h("span", { class: "hint", text: "Clicking elsewhere closes the open island and the Knowura panel (the file-drop view stays open until you switch away)" }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Pills on closed island" }),
-      toggle(settings.showMiniPills, (v) => { settings.showMiniPills = v; void save(); }),
-      h("span", { class: "hint", text: "The small integration pills beside Mochi; off leaves just the main blob" }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Auto-hide" }),
-      toggle(settings.autoHide, (v) => { settings.autoHide = v; void save(); }),
-      h("span", { class: "hint", text: "Off keeps the island open and visible until you close it" }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Open island width" }),
-      width.el,
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Closed island height" }),
-      compactHeight.el,
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Open island height" }),
-      heightExtra.el,
-      resetSize,
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Always on top" }),
-      toggle(settings.alwaysOnTop, (v) => { settings.alwaysOnTop = v; void save(); }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Show in taskbar" }),
-      toggle(settings.showInTaskbar, (v) => { settings.showInTaskbar = v; void save(); }),
-    ),
-  );
-}
-
-// ── Knowura Speak section ─────────────────────────────────────────────────────
-
-const SPEAK_LANGUAGES: [string, string][] = [
-  ["auto", "Automatic"], ["en", "English"], ["fr", "Français"], ["es", "Español"], ["de", "Deutsch"], ["it", "Italiano"],
-  ["pt", "Português"], ["nl", "Nederlands"], ["pl", "Polski"], ["tr", "Türkçe"], ["ru", "Русский"],
-  ["ja", "日本語"], ["zh", "中文"], ["ko", "한국어"], ["hi", "हिन्दी"], ["ar", "العربية"],
-];
-
-// ── Computer use section ──────────────────────────────────────────────────────
-
-function brainPicker(): HTMLElement {
-  const sel = h("select", {}) as HTMLSelectElement;
-  sel.append(
-    h("option", { value: "claude", text: "Claude Code (your Claude plan)" }),
-    h("option", { value: "groq", text: "Groq (free API key)" }),
-  );
-  sel.value = settings.computerBrain;
-  sel.addEventListener("change", () => {
-    settings.computerBrain = sel.value === "groq" ? "groq" : "claude";
-    void save();
-  });
-  return sel;
-}
-
-function computerSection(): HTMLElement {
-  return h(
-    "section",
-    {},
-    h("h2", {}, h("span", { text: "Mochi does tasks on your PC" })),
-    h("div", { class: "hint", text: "Tell Mochi what to do (tray icon → \"Mochi: do something on my PC…\") and he does it with his own blue pointer: he looks at the screen, moves your mouse, clicks and types. Press Esc, move the mouse yourself, or use the tray's \"Stop Mochi\" to stop him at any time." }),
-    h("div", { class: "row" },
-      h("label", { text: "Who thinks for Mochi" }),
-      brainPicker(),
-      h("span", { class: "hint", text: "Claude Code uses your Claude plan and is much better at clicking the right thing. Groq is free but slow." }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Let Mochi use my PC" }),
-      toggle(settings.computerUse, (v) => { settings.computerUse = v; void save(); }),
-      h("span", { class: "hint", text: "Off by default. He never types passwords, pays, sends or deletes unless you ask." }),
-    ),
-  );
-}
-
-function speakSection(): HTMLElement {
-  const language = h("select", {}) as HTMLSelectElement;
-  for (const [code, name] of SPEAK_LANGUAGES) language.append(h("option", { value: code, text: name }));
-  language.value = settings.speakLanguage;
-  language.addEventListener("change", () => {
-    settings.speakLanguage = language.value;
-    void save();
-  });
-
-  const model = h("select", {}) as HTMLSelectElement;
-  model.append(
-    h("option", { value: "whisper-large-v3-turbo", text: "Turbo (fastest)" }),
-    h("option", { value: "whisper-large-v3", text: "Large v3 (most accurate)" }),
-  );
-  model.value = settings.speakModel;
-  model.addEventListener("change", () => {
-    settings.speakModel = model.value;
-    void save();
-  });
-
-  const words = h("input", {
-    type: "text",
-    value: settings.speakWords,
-    placeholder: "Knowura, Coucou, Mochi",
-    style: "flex:1 1 auto;min-width:0",
-    spellcheck: "false",
-  }) as HTMLInputElement;
-  words.addEventListener("change", () => {
-    settings.speakWords = words.value.slice(0, 300);
-    void save();
-  });
-
-  return h(
-    "section",
-    {},
-    h("h2", {}, h("span", { text: "Knowura Speak" })),
-    h("div", { class: "hint", text: "Hold Ctrl+Win, talk, let go: the words are typed wherever you were typing, and a small Mochi in headphones listens above your cursor, dressed in his usual outfit. Your voice is sent to Groq's Whisper with your own key when you let go; it is never saved on this PC." }),
-    h("div", { class: "row" },
-      h("label", { text: "Knowura Speak" }),
-      toggle(settings.speakEnabled, (v) => { settings.speakEnabled = v; void save(); }),
-      h("span", { class: "hint", text: "Watches for Ctrl+Win only while this is on" }),
-    ),
-    h("div", { class: "hint", text: "Your Groq API key (console.groq.com). It stays in the Windows Credential Manager." }),
-    ...(() => {
-      const k = keyRow("groq-api-key", "gsk_…", "No key yet: Knowura Speak needs one.");
-      return [k.row, h("div", { class: "row" }, k.dot, k.state), k.feedback];
-    })(),
-    h("div", { class: "row" }, h("label", { text: t("Model") }), model),
-    h("div", { class: "row" },
-      h("label", { text: t("Language") }),
-      language,
-      h("span", { class: "hint", text: "Automatic works for most people" }),
-    ),
-    h("div", { class: "row" },
-      h("label", { text: "Words to spell your way" }),
-      words,
-    ),
-  );
-}
-
-// ── Weather section ───────────────────────────────────────────────────────────
-
-function weatherSection(): HTMLElement {
-  const status = h("div", { class: "hint", text: settings.weatherPlace ? `Showing the weather for ${settings.weatherPlace}.` : "No city chosen yet." });
-  const input = h("input", {
-    type: "text",
-    placeholder: "Your city, for example Paris",
-    style: "flex:1 1 auto;min-width:0",
-    autocomplete: "off",
-    spellcheck: "false",
-  }) as HTMLInputElement;
-  const find = h("button", { class: "primary", text: "Find" });
-  const results = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
-
-  const choose = (p: { name: string; detail: string; lat: number; lon: number }) => {
-    settings.weatherPlace = p.name;
-    settings.weatherLat = p.lat;
-    settings.weatherLon = p.lon;
-    void save();
-    status.textContent = `Showing the weather for ${p.name}${p.detail ? ` (${p.detail})` : ""}.`;
-    clear(results);
-    input.value = "";
-  };
-
-  async function search() {
-    const query = input.value.trim();
-    if (!query) return;
-    clear(results);
-    results.append(h("div", { class: "hint", text: "Searching…" }));
-    try {
-      const found = await Bridge.weatherSearch(query);
-      clear(results);
-      if (!found.length) {
-        results.append(h("div", { class: "hint", text: "No city by that name." }));
-        return;
-      }
-      for (const p of found) {
-        results.append(h("button", { text: p.detail ? `${p.name} — ${p.detail}` : p.name, onclick: () => choose(p) }));
-      }
-    } catch (err) {
-      clear(results);
-      results.append(h("div", { class: "notice err", text: String(err).replace(/^Error:\s*/, "") }));
-    }
-  }
-  find.addEventListener("click", () => void search());
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") void search(); });
-
-  const units = h("select", {}) as HTMLSelectElement;
-  units.append(h("option", { value: "c", text: "Celsius (°C, km/h)" }), h("option", { value: "f", text: "Fahrenheit (°F, mph)" }));
-  units.value = settings.weatherFahrenheit ? "f" : "c";
-  units.addEventListener("change", () => { settings.weatherFahrenheit = units.value === "f"; void save(); });
-
-  return h(
-    "section",
-    {},
-    h("h2", {}, h("span", { text: "Weather" })),
-    h("div", { class: "hint", text: "Shows the temperature in the island's bar and a weather tab. It uses Open-Meteo, which needs no account; only the city you pick here is looked up." }),
-    status,
-    h("div", { class: "row" }, h("label", { text: "City" }), input, find),
-    results,
-    h("div", { class: "row" }, h("label", { text: "Units" }), units),
-    h("div", { class: "row" },
-      h("label", { text: "Show weather" }),
-      toggle(settings.showWeather, (v) => { settings.showWeather = v; void save(); }),
-    ),
-  );
-}
 
 /**
  * The tools you use (Mac 0.1.1–0.1.2): pick the main workspace tool, which is
@@ -1202,6 +788,8 @@ const INTEGRATIONS: IntegrationDef[] = [
     fields: [{ key: "notion-api-key", label: N_("Integration token"), placeholder: "ntn_…", secret: true }] },
   { id: "integration_calcom", name: "Cal.com", color: "#C9956A",
     fields: [{ key: "calcom-api-key", label: N_("API key"), placeholder: "cal_…", secret: true }] },
+  // Nothing to enter: Spotify is read from the OS (src-tauri/src/spotify.rs).
+  { id: "integration_spotify", name: "Spotify", color: "#1DB954", fields: [] },
 ];
 
 const MAX_ACTIVE = MAX_DECLARED;
@@ -1224,7 +812,8 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
   }
   declaredViews.push(updateNote);
 
-  for (const def of INTEGRATIONS) {
+  const offered = new Set(availablePills().map((p) => p.id));
+  for (const def of INTEGRATIONS.filter((d) => offered.has(d.id))) {
     const active = settings.activeIntegrations.includes(def.id);
     const sw = h("button", { class: active ? "switch on" : "switch" });
     sw.addEventListener("click", () => {
@@ -1271,6 +860,14 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
     }
 
     if (def.hint) rows.append(h("div", { class: "hint", text: t(def.hint) }));
+    if (def.id === "integration_spotify") {
+      // As on the Mac's row: said only when there is no Spotify to launch.
+      const hint = h("div", { class: "hint", style: "padding-top:5px" });
+      rows.append(hint);
+      void Bridge.spotifyInstalled().then((ok) => {
+        hint.textContent = ok === false ? t("Not installed") : "";
+      });
+    }
 
     list.append(
       h("div", { style: "display:flex;gap:12px;align-items:flex-start" },
@@ -1298,6 +895,20 @@ function generalSection(): HTMLElement {
   volume.addEventListener("input", () => {
     settings.soundVolume = Number(volume.value);
     void save();
+  });
+
+  // Your own sounds: the folder, a reload, and how many are replaced.
+  const customCount = h("span", { class: "hint" });
+  const countCustom = () =>
+    void Bridge.customSounds(SOUND_NAMES).then((own) => {
+      const n = own?.length ?? 0;
+      customCount.textContent = n > 0 ? t("{0} custom", { 0: n }) : "";
+    });
+  countCustom();
+  const soundsFolder = h("button", { text: t("Open sounds folder"), onclick: () => void Bridge.revealSoundsFolder() });
+  const reloadSounds = h("button", {
+    text: t("Reload sounds"),
+    onclick: () => void Bridge.reloadSounds().then(() => window.setTimeout(countCustom, 300)),
   });
 
   const autoClose = h("input", {
@@ -1346,6 +957,18 @@ function generalSection(): HTMLElement {
       toggle(settings.soundEnabled, (v) => { settings.soundEnabled = v; void save(); }),
       volume,
     ),
+    h("div", { class: "row" }, soundsFolder, reloadSounds, customCount),
+    h("div", { class: "hint", text: t("Drop a file named like one of Mochi's sounds (finish.wav, approval.mp3, greet.m4a…) in the sounds folder to replace it, then Reload.") }),
+    h("div", { class: "row" },
+      h("label", { text: t("Open on hover") }),
+      toggle(settings.openOnHover, (v) => { settings.openOnHover = v; void save(); }),
+    ),
+    h("div", { class: "hint", text: t("Hovering the island opens it; it folds again shortly after the pointer leaves. Click inside to keep it open.") }),
+    h("div", { class: "row" },
+      h("label", { text: t("Show clock in the island") }),
+      toggle(settings.showClock, (v) => { settings.showClock = v; void save(); }),
+    ),
+    h("div", { class: "hint", text: t("The date and the time in the middle of the island when it is compact.") }),
     h("div", { class: "row" },
       h("label", { text: t("Auto-close") }),
       autoClose,
@@ -1360,6 +983,7 @@ function generalSection(): HTMLElement {
       toggle(settings.autostart, (v) => { settings.autostart = v; void save(); }),
     ),
     ...recapRows(),
+    ...updateRows(toggle, version),
     languageRow(),
   );
 }
@@ -1405,6 +1029,17 @@ const SHORTCUTS_UI = {
     return t("Your Wayland desktop doesn't let apps listen for keys outside their own windows. Add the shortcuts in your system's keyboard settings instead, with these commands:");
   },
   get noDisplay() { return t("No display server was found, so global shortcuts are off."); },
+  get portalPending() {
+    return t("Asking your desktop to register the shortcuts. It may show its own window to confirm them.");
+  },
+  get portalActive() {
+    return t("These shortcuts are registered with your desktop. It may ask you to confirm them or to pick other keys; when it says which keys it uses, they show next to each shortcut.");
+  },
+  get portalFallback() {
+    return t("If one doesn't work, you can also add it in your system's keyboard settings with these commands:");
+  },
+  desktopKeys: (keys: string) => t("Desktop: {keys}", { keys }),
+  get refused() { return t("Not set by your desktop"); },
 };
 
 function shortcutsSection(initial: ShortcutsReport | null): HTMLElement {
@@ -1429,6 +1064,9 @@ function shortcutsSection(initial: ShortcutsReport | null): HTMLElement {
       case "invalid": return h("span", { class: "tag err", text: SHORTCUTS_UI.invalid });
       case "typesCharacter": return h("span", { class: "tag warn", text: SHORTCUTS_UI.types(st.typed ?? "?") });
       case "unsupported": return h("span", { class: "tag", text: SHORTCUTS_UI.unavailable });
+      case "refused": return h("span", { class: "tag warn", text: SHORTCUTS_UI.refused });
+      // Wayland: the desktop may run it on other keys than the ones asked for.
+      case "active": return st.trigger ? h("span", { class: "tag", text: SHORTCUTS_UI.desktopKeys(st.trigger) }) : null;
       default: return null;
     }
   }
@@ -1511,12 +1149,27 @@ function shortcutsSection(initial: ShortcutsReport | null): HTMLElement {
     }
 
     clear(blockedNote);
-    if (report?.blocked === "wayland") {
-      const commands = h("div", { class: "diff" });
+    const commands = (command: string) => {
+      const list = h("div", { class: "diff" });
       for (const d of SHORTCUTS) {
-        if (d.ported) commands.append(h("div", { class: "ctx", text: `${report.command} ${d.id}` }));
+        if (d.ported) list.append(h("div", { class: "ctx", text: `${command} ${d.id}` }));
       }
-      blockedNote.append(h("div", { class: "notice warn", text: SHORTCUTS_UI.wayland }), commands);
+      return list;
+    };
+    if (report?.portal) {
+      // Wayland, through the desktop's GlobalShortcuts portal; the commands
+      // stay as a way around a shortcut the desktop didn't take.
+      const active = report.portal === "active";
+      blockedNote.append(
+        h("div", {
+          class: active ? "notice ok" : "notice",
+          text: active ? SHORTCUTS_UI.portalActive : SHORTCUTS_UI.portalPending,
+        }),
+        h("div", { class: "hint", text: SHORTCUTS_UI.portalFallback }),
+        commands(report.command),
+      );
+    } else if (report?.blocked === "wayland") {
+      blockedNote.append(h("div", { class: "notice warn", text: SHORTCUTS_UI.wayland }), commands(report.command));
     } else if (report?.blocked) {
       blockedNote.append(h("div", { class: "notice warn", text: SHORTCUTS_UI.noDisplay }));
     }
@@ -1628,30 +1281,7 @@ function applyLanguage() {
 
 function applyDirection() {
   document.documentElement.dir = isRtl() ? "rtl" : "ltr";
-  document.title = t("Settings — Coucou");
-}
-
-let rendering: Promise<void> | null = null;
-let renderAgain = false;
-
-/** Redraws every section from fresh state, keeping the scroll position. */
-async function rerender() {
-  if (rendering) {
-    renderAgain = true;
-    return;
-  }
-  const scroll = document.scrollingElement?.scrollTop ?? 0;
-  rendering = render();
-  try {
-    await rendering;
-  } finally {
-    rendering = null;
-  }
-  if (document.scrollingElement) document.scrollingElement.scrollTop = scroll;
-  if (renderAgain) {
-    renderAgain = false;
-    await rerender();
-  }
+  document.title = "Coucou";
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -1661,16 +1291,25 @@ async function main() {
   if (boot) {
     settings = { ...settings, ...boot.settings };
     version = boot.version;
+    knowuraHotkey = boot.knowuraHotkey ?? null;
   }
   setLanguage(resolveLanguage(settings.language, systemLanguages()));
   applyDirection();
+  hub = await startHub(windowRoot, {
+    version,
+    renderNotch: async (page, container) => {
+      notchPage = page;
+      root = container;
+      await render();
+    },
+  });
   onLanguageChange(() => {
     applyDirection();
-    void rerender();
+    hub?.redraw();
   });
-  await render();
 
   void onEvent<ShortcutsReport>("shortcuts-status", (fresh) => shortcutsListener?.report(fresh));
+  void onEvent<UpdateStatus>("update-status", (fresh) => updatesListener?.(fresh));
   void onEvent<Settings>("settings-changed", (s) => {
     const before = `${settings.chatProvider}|${settings.ollamaUrl}|${settings.lmstudioUrl}|${settings.customUrl}`;
     settings = { ...settings, ...s };
@@ -1682,9 +1321,11 @@ async function main() {
   });
 }
 
-/** Reads what the sections show and draws them all. */
+/** The Notch page being shown. */
+let notchPage: PageId = "general";
+
+/** Reads what the sections of the Notch page show and draws them. */
 async function render() {
-  const knowuraHotkey = (await Bridge.boot())?.knowuraHotkey ?? null;
   const status = (await Bridge.hooksStatus()) ?? {
     installed: false, planRelayInstalled: false, settingsPath: "", hookPath: "", hookReady: false,
   };
@@ -1726,29 +1367,25 @@ async function render() {
   localRedraw = null;
   shortcutsListener = null;
   clear(root);
-  root.append(
-    h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
-    claudeSection(status),
-    agentsSection(agents),
-    planSection(status),
-    assistantSection(knowuraHotkey),
-    apiSection(hasKey),
-    chatProvidersSection(chatKeys, keyChanged),
-    localSection(customKey),
-    activePillsSection(connected),
-    integrationsSection(present),
-    layoutSection(),
-    islandSection(),
-    speakSection(),
-    computerSection(),
-    weatherSection(),
-    generalSection(),
-    shortcutsSection(shortcutReport),
-    h("div", {
+  const sections: Partial<Record<PageId, () => HTMLElement[]>> = {
+    general: () => [generalSection(), backupSection()],
+    knowura: () => [assistantSection(knowuraHotkey), speakSection()],
+    island: () => [layoutSection(), islandSection(), weatherSection()],
+    computer: () => [computerSection()],
+    pills: () => [activePillsSection(connected)],
+    agents: () => [claudeSection(status), agentsSection(agents), planSection(status)],
+    chat: () => [apiSection(hasKey), chatProvidersSection(chatKeys, keyChanged), localSection(customKey)],
+    integrations: () => [integrationsSection(present)],
+    phone: () => [phoneSection(settings.phoneLink ?? false, toggle, settings)],
+    shortcuts: () => [shortcutsSection(shortcutReport)],
+  };
+  root.append(...(sections[notchPage]?.() ?? []));
+  if (notchPage === "general") {
+    root.append(h("div", {
       class: "hint",
       text: t("No telemetry. Network requests only go to the services you configure yourself."),
-    }),
-  );
+    }));
+  }
 }
 
 void main();

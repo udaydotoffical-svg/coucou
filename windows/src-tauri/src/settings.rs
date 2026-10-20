@@ -16,6 +16,9 @@ pub struct Settings {
     pub sound_enabled: bool,
     pub sound_volume: f64,
     pub auto_close_interval: f64,
+    /// Hovering the island opens it all the way, and it folds again shortly
+    /// after the pointer leaves (the Mac's "Open on hover"). Off by default.
+    pub open_on_hover: bool,
     pub absence_interval: f64,
     pub active_integrations: Vec<String>,
     /// The always-on workspace pill (src/core/pills.ts checks it is one).
@@ -96,8 +99,6 @@ pub struct Settings {
     pub show_mini_pills: bool,
     /// Close the open island, and the Knowura panel, when you click anywhere else.
     pub close_on_click_outside: bool,
-    /// Open when the pointer rests on the island, close when it leaves.
-    pub open_on_hover: bool,
     /// When off, the island never closes or hides by itself.
     pub auto_hide: bool,
     pub always_on_top: bool,
@@ -113,6 +114,39 @@ pub struct Settings {
     pub computer_use: bool,
     /// Who thinks for Mochi: "claude" (Claude Code on this PC, your Claude plan) or "groq" (the free API).
     pub computer_brain: String,
+    /// Mochi reacts to the PC: he sweats when the processor is busy, puffs up when memory is short,
+    /// gets tired on a low battery (vitals.rs).
+    pub mochi_feels_pc: bool,
+    /// The phone link (phone_link/) is on: a TLS server for the Android app on
+    /// the local network. Off until the user turns it on in Settings → Phone;
+    /// owned by the Rust side, so what a webview sends back is ignored.
+    pub phone_link: bool,
+    /// The phone may chat through this computer's API keys (phone_link/chat.rs).
+    /// Off until the user turns it on in Settings → Android phone; owned by the
+    /// Rust side like `phone_link`, so what a webview sends back is ignored.
+    pub phone_chat: bool,
+    /// Which models the phone may use, as "provider/model". Empty allows none.
+    /// Also owned by the Rust side (phone_link::set_chat_models cleans it).
+    pub phone_chat_models: Vec<String>,
+    /// The phone may see session details (steps, last line, project folder name, colour). Off until the
+    /// user turns it on in Settings → Android phone; owned by the Rust side like `phone_link`.
+    pub phone_details: bool,
+    /// Let the phone answer the questions Claude Code asks (cap `answers`). Off by default; owned by Rust like the other phone switches.
+    pub phone_answers: bool,
+    /// Show the files an agent changed on the phone, and their diffs on request (cap `diffs`). Off by default; owned by Rust like the other phone switches.
+    pub phone_diffs: bool,
+    /// Show the Claude and Codex plan usage on the phone (cap `usage`). Off by default; owned by Rust like the other phone switches.
+    pub phone_usage: bool,
+    /// The service pills whose cards the phone may see, by pill id (cap `services`). None by default; owned by Rust like the other phone switches.
+    pub phone_services: Vec<String>,
+    /// Reach the phone through the user's own relay when it is not on this network (phone_link/relay_client.rs).
+    /// Off by default; owned by Rust like the other phone switches. The access key, the room and the pairing key live
+    /// in the OS keystore, never here.
+    pub phone_relay: bool,
+    /// The relay's address (`wss://…`), empty until the user enters it. Not a secret. Owned by Rust.
+    pub phone_relay_url: String,
+    /// The date and time in the middle of the compact island. Off by default.
+    pub show_clock: bool,
 }
 
 pub const ISLAND_WIDTH_MIN: f64 = 560.0;
@@ -250,6 +284,7 @@ impl Default for Settings {
             sound_enabled: true,
             sound_volume: 0.12,
             auto_close_interval: 15.0,
+            open_on_hover: false,
             absence_interval: 180.0,
             active_integrations: vec![
                 "integration_resend".into(),
@@ -290,7 +325,6 @@ impl Default for Settings {
             show_weather: true,
             show_mini_pills: true,
             close_on_click_outside: true,
-            open_on_hover: false,
             auto_hide: true,
             always_on_top: true,
             show_in_taskbar: false,
@@ -300,6 +334,18 @@ impl Default for Settings {
             speak_words: "Knowura, Coucou, Mochi".into(),
             computer_use: false,
             computer_brain: "claude".into(),
+            mochi_feels_pc: true,
+            phone_link: false,
+            phone_chat: false,
+            phone_chat_models: Vec::new(),
+            phone_details: false,
+            phone_answers: false,
+            phone_diffs: false,
+            phone_usage: false,
+            phone_services: Vec::new(),
+            phone_relay: false,
+            phone_relay_url: String::new(),
+            show_clock: false,
         }
     }
 }
@@ -316,6 +362,92 @@ fn settings_path() -> PathBuf {
 
 pub fn load() -> Settings {
     load_from(&settings_path())
+}
+
+// ── Backups: an upgrade never costs you your settings ─────────────────────────
+
+const BACKUP_PREFIX: &str = "settings.json.backup-";
+const KEEP_BACKUPS: usize = 12;
+
+/// Before a new version first runs on this settings.json, a copy of it is kept next to it
+/// (`settings.json.backup-before-0.5.1`), once per version. Settings → General → Backups
+/// restores one. Never fails the start-up: a backup that could not be made is only logged.
+pub fn backup_for_upgrade(version: &str) {
+    let dir = config_dir();
+    let file = settings_path();
+    let marker = dir.join("settings.json.last-version");
+    let last = std::fs::read_to_string(&marker).unwrap_or_default();
+    if last.trim() == version {
+        return;
+    }
+    if file.is_file() {
+        let name = format!("{BACKUP_PREFIX}before-{version}");
+        let target = dir.join(&name);
+        if !target.exists() {
+            match std::fs::copy(&file, &target) {
+                Ok(_) => crate::log::line(format!("settings: backed up as {name}")),
+                Err(err) => crate::log::line(format!("settings: could not back up before {version}: {err}")),
+            }
+        }
+        prune_backups(&dir);
+    }
+    let _ = std::fs::write(&marker, version);
+}
+
+/// Only the newest KEEP_BACKUPS stay; the ones made by hand count too.
+fn prune_backups(dir: &Path) {
+    let mut all = backup_files(dir);
+    while all.len() > KEEP_BACKUPS {
+        let (_, oldest) = all.remove(0);
+        let _ = std::fs::remove_file(oldest);
+    }
+}
+
+/// (modified time, path), oldest first.
+fn backup_files(dir: &Path) -> Vec<(std::time::SystemTime, PathBuf)> {
+    let mut out: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(BACKUP_PREFIX))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    out.sort_by_key(|(t, _)| *t);
+    out
+}
+
+/// The backups on this PC, newest first: (file name, modified time as Unix seconds).
+pub fn backups() -> Vec<(String, u64)> {
+    backup_files(&config_dir())
+        .into_iter()
+        .rev()
+        .map(|(t, p)| {
+            let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            (p.file_name().unwrap_or_default().to_string_lossy().to_string(), secs)
+        })
+        .collect()
+}
+
+/// A backup, read like the settings file is (every field it lacks takes its default), or None when
+/// `name` is not one of ours or cannot be read.
+pub fn read_backup(name: &str) -> Option<Settings> {
+    if !name.starts_with(BACKUP_PREFIX) || name.contains(['/', '\\']) || name.contains("..") {
+        return None;
+    }
+    let bytes = std::fs::read(config_dir().join(name)).ok()?;
+    parse(&bytes).map(Settings::sanitized)
+}
+
+/// Keeps what is in force now before a restore replaces it.
+pub fn backup_current(label: &str) {
+    let file = settings_path();
+    if file.is_file() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = std::fs::copy(&file, config_dir().join(format!("{BACKUP_PREFIX}{label}-{stamp}")));
+    }
 }
 
 pub fn save(settings: &Settings) -> std::io::Result<()> {
@@ -557,6 +689,7 @@ mod tests {
   "soundEnabled": false,
   "soundVolume": 0.5,
   "autoCloseInterval": 30.0,
+  "openOnHover": true,
   "absenceInterval": 60.0,
   "activeIntegrations": ["integration_notion"],
   "mainPill": "agent_cursor",
@@ -592,7 +725,6 @@ mod tests {
   "showWeather": false,
   "showMiniPills": false,
   "closeOnClickOutside": false,
-  "openOnHover": true,
   "autoHide": false,
   "alwaysOnTop": false,
   "showInTaskbar": true,
@@ -601,7 +733,19 @@ mod tests {
   "speakLanguage": "fr",
   "speakWords": "Coucou",
   "computerUse": true,
-  "computerBrain": "groq"
+  "computerBrain": "groq",
+  "mochiFeelsPc": false,
+  "phoneLink": true,
+  "phoneChat": true,
+  "phoneChatModels": ["openai/gpt-x"],
+  "phoneDetails": true,
+  "phoneAnswers": true,
+  "phoneDiffs": true,
+  "phoneUsage": true,
+  "phoneServices": ["integration_stripe"],
+  "phoneRelay": true,
+  "phoneRelayUrl": "wss://relay.example.workers.dev",
+  "showClock": true
 }"##;
 
     fn custom() -> Value {
@@ -705,6 +849,100 @@ mod tests {
         assert_eq!(loaded.desktop_mochi, DesktopMochiPref::default());
         assert!(!loaded.desktop_mochi.on_desktop);
         assert_eq!(loaded.mochi_outfit, "witchHat");
+    }
+
+    #[test]
+    fn a_file_from_before_the_phone_link_keeps_it_off() {
+        // The link opens a port on the local network: it is never on by default,
+        // and an older file must not be read as consent.
+        assert!(!Settings::default().phone_link);
+        let loaded = parse(&custom_with("phoneLink", None)).unwrap();
+        assert!(!loaded.phone_link);
+        assert_eq!(loaded.mochi_outfit, "witchHat");
+        assert!(parse(&custom_with("phoneLink", Some(serde_json::json!(true)))).unwrap().phone_link);
+
+        // A value of the wrong type does not switch it on either, and costs nothing else.
+        let (dir, file) = scratch("phone-link");
+        std::fs::write(&file, custom_with("phoneLink", Some(serde_json::json!("yes")))).unwrap();
+        let odd = load_from(&file);
+        assert!(!odd.phone_link);
+        assert_eq!(odd.mochi_outfit, "witchHat");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_before_phone_chat_keeps_it_off_and_empty() {
+        // Chat spends the user's API credit: never on by default, and an older file is not consent.
+        let d = Settings::default();
+        assert!(!d.phone_chat);
+        assert!(d.phone_chat_models.is_empty());
+        let loaded = parse(&custom_with("phoneChat", None)).unwrap();
+        assert!(!loaded.phone_chat);
+        assert!(parse(&custom_with("phoneChat", Some(serde_json::json!(true)))).unwrap().phone_chat);
+        let odd = parse(&custom_with("phoneChat", Some(serde_json::json!("yes")))).unwrap();
+        assert!(!odd.phone_chat, "a wrong type does not switch it on");
+        assert_eq!(odd.mochi_outfit, "witchHat");
+        let models = parse(&custom_with("phoneChatModels", Some(serde_json::json!(["openai/gpt-x"])))).unwrap();
+        assert_eq!(models.phone_chat_models, vec!["openai/gpt-x".to_string()]);
+        let bad = parse(&custom_with("phoneChatModels", Some(serde_json::json!("openai/gpt-x")))).unwrap();
+        assert!(bad.phone_chat_models.is_empty());
+    }
+
+    #[test]
+    fn a_file_from_before_phone_answers_keeps_it_off() {
+        // Answering for the agent from the phone is never on by default; an older file is not consent.
+        assert!(!Settings::default().phone_answers);
+        assert!(!parse(&custom_with("phoneAnswers", None)).unwrap().phone_answers);
+        assert!(parse(&custom_with("phoneAnswers", Some(serde_json::json!(true)))).unwrap().phone_answers);
+        assert!(!parse(&custom_with("phoneAnswers", Some(serde_json::json!("yes")))).unwrap().phone_answers, "a wrong type does not switch it on");
+    }
+
+    #[test]
+    fn a_file_from_before_phone_diffs_keeps_it_off() {
+        // Showing what an agent changed on the phone is never on by default; an older file is not consent.
+        assert!(!Settings::default().phone_diffs);
+        assert!(!parse(&custom_with("phoneDiffs", None)).unwrap().phone_diffs);
+        assert!(parse(&custom_with("phoneDiffs", Some(serde_json::json!(true)))).unwrap().phone_diffs);
+        assert!(!parse(&custom_with("phoneDiffs", Some(serde_json::json!("yes")))).unwrap().phone_diffs, "a wrong type does not switch it on");
+    }
+
+    #[test]
+    fn a_file_from_before_phone_usage_keeps_it_off() {
+        assert!(!Settings::default().phone_usage);
+        assert!(!parse(&custom_with("phoneUsage", None)).unwrap().phone_usage);
+        assert!(parse(&custom_with("phoneUsage", Some(serde_json::json!(true)))).unwrap().phone_usage);
+        assert!(!parse(&custom_with("phoneUsage", Some(serde_json::json!("yes")))).unwrap().phone_usage, "a wrong type does not switch it on");
+    }
+
+    #[test]
+    fn a_file_from_before_the_relay_keeps_it_off_and_empty() {
+        assert!(!Settings::default().phone_relay);
+        assert!(Settings::default().phone_relay_url.is_empty());
+        let old = parse(&custom_with("phoneRelay", None)).unwrap();
+        assert!(!old.phone_relay);
+        assert!(parse(&custom_with("phoneRelay", Some(serde_json::json!(true)))).unwrap().phone_relay);
+        assert!(!parse(&custom_with("phoneRelay", Some(serde_json::json!("yes")))).unwrap().phone_relay, "a wrong type does not switch it on");
+        assert!(parse(&custom_with("phoneRelayUrl", Some(serde_json::json!(5)))).unwrap().phone_relay_url.is_empty());
+    }
+
+    #[test]
+    fn a_file_from_before_phone_services_shows_none() {
+        // Showing a service on the phone is never on by default; an older file is not consent.
+        assert!(Settings::default().phone_services.is_empty());
+        assert!(parse(&custom_with("phoneServices", None)).unwrap().phone_services.is_empty());
+        assert_eq!(parse(&custom_with("phoneServices", Some(serde_json::json!(["integration_stripe"])))).unwrap().phone_services, vec!["integration_stripe".to_string()]);
+        assert!(parse(&custom_with("phoneServices", Some(serde_json::json!("integration_stripe")))).unwrap().phone_services.is_empty(), "a wrong type shows none");
+    }
+
+    #[test]
+    fn a_file_from_before_phone_details_keeps_them_off() {
+        // Details can include commands and folder names: never on by default, an older file is not consent.
+        assert!(!Settings::default().phone_details);
+        assert!(!parse(&custom_with("phoneDetails", None)).unwrap().phone_details);
+        assert!(parse(&custom_with("phoneDetails", Some(serde_json::json!(true)))).unwrap().phone_details);
+        let odd = parse(&custom_with("phoneDetails", Some(serde_json::json!("yes")))).unwrap();
+        assert!(!odd.phone_details, "a wrong type does not switch it on");
+        assert_eq!(odd.mochi_outfit, "witchHat");
     }
 
     #[test]
@@ -984,6 +1222,7 @@ mod tests {
                 "soundEnabled",
                 "soundVolume",
                 "autoCloseInterval",
+                "openOnHover",
                 "absenceInterval",
                 "activeIntegrations",
                 "mainPill",
@@ -1019,7 +1258,6 @@ mod tests {
                 "showWeather",
                 "showMiniPills",
                 "closeOnClickOutside",
-                "openOnHover",
                 "autoHide",
                 "alwaysOnTop",
                 "showInTaskbar",
@@ -1029,6 +1267,18 @@ mod tests {
                 "speakWords",
                 "computerUse",
                 "computerBrain",
+                "mochiFeelsPc",
+                "phoneLink",
+                "phoneChat",
+                "phoneChatModels",
+                "phoneDetails",
+                "phoneAnswers",
+                "phoneDiffs",
+                "phoneUsage",
+                "phoneServices",
+                "phoneRelay",
+                "phoneRelayUrl",
+                "showClock",
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1064,5 +1314,12 @@ mod tests {
         assert!(save_to(&file, &Settings::default()).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), CUSTOM.as_bytes());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_our_own_backups_can_be_read_back() {
+        for bad in ["settings.json", "../settings.json", "settings.json.backup-..\\x","settings.json.backup-a/b", "other"] {
+            assert!(read_backup(bad).is_none(), "{bad}");
+        }
     }
 }
