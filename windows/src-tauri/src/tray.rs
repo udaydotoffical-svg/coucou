@@ -28,17 +28,17 @@ const ITEMS: [(&str, &str); 6] = [
 struct Items(Mutex<Vec<(&'static str, MenuItem<Wry>)>>);
 
 /// What the menu depends on in the settings: Knowura mode, and starting with Windows.
-fn wanted(app: &AppHandle) -> (bool, bool) {
+fn wanted(app: &AppHandle) -> (bool, bool, bool) {
     app.try_state::<crate::Shared>()
         .map(|s| {
             let s = s.settings.lock().unwrap();
-            (s.assistant_mode == "knowura", s.autostart)
+            (s.assistant_mode == "knowura", s.autostart, s.computer_use)
         })
-        .unwrap_or((false, false))
+        .unwrap_or((false, false, false))
 }
 
 fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
-    let (knowura_mode, autostart) = wanted(app);
+    let (knowura_mode, autostart, computer) = wanted(app);
     let mut items = Vec::new();
     for (id, label) in ITEMS {
         items.push((label, MenuItem::with_id(app, id, t(label), true, None::<&str>)?));
@@ -56,6 +56,11 @@ fn make_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         menu.append(&MenuItem::with_id(app, "kw_app", "Open the full Knowura app", true, None::<&str>)?)?;
         menu.append(&MenuItem::with_id(app, "kw_signin", "Sign in with the browser…", true, None::<&str>)?)?;
         menu.append(&sep3)?;
+    }
+    if computer && cfg!(windows) {
+        menu.append(&MenuItem::with_id(app, "computer", "Mochi: do something on my PC…", true, None::<&str>)?)?;
+        menu.append(&MenuItem::with_id(app, "computer_stop", "Stop Mochi", true, None::<&str>)?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
     }
     let all: [&dyn IsMenuItem<Wry>; 9] = [open, recap, &sep1, wardrobe, settings, pause, &start, &sep2, quit];
     for item in all {
@@ -84,6 +89,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "kw_voice" => knowura::open(app, Mode::Voice),
             "kw_app" => knowura::open_full(app, "/"),
             "kw_signin" => knowura::sign_in_browser(),
+            #[cfg(windows)]
+            "computer_stop" => crate::computer::stop(),
             id => {
                 let _ = app.emit_to(WINDOW_LABEL, "tray", id.to_string());
             }

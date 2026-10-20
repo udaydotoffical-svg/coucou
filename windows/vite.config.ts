@@ -65,6 +65,7 @@ export default defineConfig({
         settings: resolve(__dirname, "settings.html"),
         mochi: resolve(__dirname, "mochi.html"),
         speak: resolve(__dirname, "speak.html"),
+        agent: resolve(__dirname, "agent.html"),
       },
     },
   },

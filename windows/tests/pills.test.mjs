@@ -85,9 +85,9 @@ test("this build leaves out what only macOS has, and Claude Desktop on Linux", (
     assert.ok(windows.includes(id), id);
     assert.ok(linux.includes(id), id);
   }
-  assert.ok(windows.includes("agent_claude-desktop"));
-  assert.ok(!linux.includes("agent_claude-desktop"));
-  assert.deepEqual(linux, windows.filter((id) => id !== "agent_claude-desktop"));
+  // The Claude desktop app shares the Claude pill: no pill of its own on either system.
+  assert.ok(!windows.includes("agent_claude-desktop"));
+  assert.deepEqual(linux, windows);
 });
 
 test("no chat provider that works here says Coming soon", () => {
@@ -155,7 +155,7 @@ test("up to four pills next to the main one, never the main one itself", () => {
   assert.equal(toggleDeclared(d, "integration_claude", "linux"), null);
   assert.equal(toggleDeclared(d, "integration_music", "linux"), null);
   assert.equal(toggleDeclared(d, "agent_claude-desktop", "linux"), null);
-  assert.ok(toggleDeclared(d, "agent_claude-desktop", "windows").includes("agent_claude-desktop"));
+  assert.equal(toggleDeclared(d, "agent_claude-desktop", "windows"), null);
   assert.deepEqual(toggleDeclared(d, "integration_github", "linux"), ["integration_n8n", "integration_stripe"]);
   // Every chat provider can be declared now that the chat talks to it.
   assert.ok(toggleDeclared(d, "ai_google", "linux").includes("ai_google"));

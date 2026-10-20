@@ -275,6 +275,18 @@ pub fn left_button_down() -> bool {
     unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
 }
 
+/// True while the left or the right mouse button is held: a click somewhere.
+pub fn any_button_down() -> bool {
+    let held = |vk: i32| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 };
+    held(0x01) || held(0x02)
+}
+
+/// True when the focused window is one of these.
+pub fn foreground_is_one_of(wins: &[&WebviewWindow]) -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    wins.iter().filter_map(|w| hwnd_of(w)).any(|h| h == fg)
+}
+
 // ── Island window ─────────────────────────────────────────────────────────────
 
 fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {

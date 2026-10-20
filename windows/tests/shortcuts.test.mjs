@@ -378,8 +378,8 @@ test("the terminal shortcut is the existing Open terminal (the session's window)
 
   // A Claude Desktop session lives in the Claude app.
   did = [];
-  State.upsertExternalAgent("agent_claude-desktop", "Claude Desktop", "#D97757");
-  State.setFocus("agent_claude-desktop");
+  State.tasks[0].fromDesktop = true;
+  State.setFocus(State.tasks[0].id);
   runGlobalShortcut(host, "jumpToTerminal", resume);
   assert.equal(sent("open_claude_desktop").length, 1);
 });

@@ -21,13 +21,15 @@ tauri-plugin-global-shortcut = "2"
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt"] }
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
 # Knowura Speak: the microphone.
 cpal = "0.15"
+# Mochi's computer use: the screenshots he sends to the model.
+png = "0.17"
 keyring = { version = "3", features = ["windows-native"] }
 # The island's file drop reads paths straight from WebView2 (webview_drop.rs).
 # Same versions as wry, so nothing new is compiled.

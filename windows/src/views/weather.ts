@@ -4,6 +4,7 @@
 
 import { Bridge } from "../core/bridge";
 import { State, type WeatherInfo } from "../core/state";
+import { t, tl } from "../i18n/i18n";
 import { h, clear } from "./dom";
 import type { ViewActions, ViewHost } from "./views";
 
@@ -23,7 +24,7 @@ function kindOf(code: number, isDay: boolean): Kind {
 }
 
 export function weatherLabel(code: number): string {
-  if (code === 0) return "Clear";
+  if (code === 0) return t("Clear");
   if (code === 1) return "Mostly clear";
   if (code === 2) return "Partly cloudy";
   if (code === 3) return "Overcast";
@@ -204,7 +205,7 @@ export function buildWeather(actions: ViewActions): ViewHost {
           h("div", { class: "wx-note" },
             h("b", { text: "No city yet" }),
             h("span", { text: "Choose where you are and the weather shows up here." }),
-            h("button", { class: "btn secondary", text: "Open settings", onclick: () => actions.openSettingsWindow() }),
+            h("button", { class: "btn secondary", text: tl("Open settings"), onclick: () => actions.openSettingsWindow() }),
           ),
         );
         return;

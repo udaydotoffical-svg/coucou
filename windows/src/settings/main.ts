@@ -436,8 +436,8 @@ function keyRow(secretKey: string, placeholder: string, emptyHint: string) {
     autocomplete: "off",
     spellcheck: "false",
   }) as HTMLInputElement;
-  const saveBtn = h("button", { class: "primary", text: "Save key" });
-  const clearBtn = h("button", { class: "danger", text: "Remove" });
+  const saveBtn = h("button", { class: "primary", text: t("Save key") });
+  const clearBtn = h("button", { class: "danger", text: t("Remove") });
   const feedback = h("div", {});
 
   async function refresh() {
@@ -455,7 +455,7 @@ function keyRow(secretKey: string, placeholder: string, emptyHint: string) {
     try {
       await Bridge.secretSet(secretKey, value);
       field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
+      feedback.append(h("div", { class: "notice ok", text: t("Saved. It never touches disk.") }));
       await refresh();
     } catch (err) {
       feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
@@ -466,7 +466,7 @@ function keyRow(secretKey: string, placeholder: string, emptyHint: string) {
     clear(feedback);
     try {
       await Bridge.secretClear(secretKey);
-      feedback.append(h("div", { class: "notice ok", text: "Key removed." }));
+      feedback.append(h("div", { class: "notice ok", text: t("Key removed.") }));
       await refresh();
     } catch (err) {
       feedback.append(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
@@ -477,7 +477,7 @@ function keyRow(secretKey: string, placeholder: string, emptyHint: string) {
   return {
     dot,
     state,
-    row: h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
+    row: h("div", { class: "row" }, h("label", { text: t("API key") }), field, saveBtn, clearBtn),
     feedback,
   };
 }
@@ -539,7 +539,7 @@ function layoutSection(): HTMLElement {
   const picker = (value: string, autoLabel: string, onPick: (id: string) => void) => {
     const sel = h("select", {}) as HTMLSelectElement;
     sel.append(h("option", { value: "", text: autoLabel }));
-    for (const p of candidates) sel.append(h("option", { value: p.id, text: p.id === "integration_claude" ? "VS Code" : p.name }));
+    for (const p of candidates) sel.append(h("option", { value: p.id, text: p.id === "integration_claude" ? "Claude" : p.name }));
     sel.value = candidates.some((p) => p.id === value) ? value : "";
     sel.addEventListener("change", () => onPick(sel.value));
     return sel;
@@ -667,6 +667,41 @@ const SPEAK_LANGUAGES: [string, string][] = [
   ["ja", "日本語"], ["zh", "中文"], ["ko", "한국어"], ["hi", "हिन्दी"], ["ar", "العربية"],
 ];
 
+// ── Computer use section ──────────────────────────────────────────────────────
+
+function brainPicker(): HTMLElement {
+  const sel = h("select", {}) as HTMLSelectElement;
+  sel.append(
+    h("option", { value: "claude", text: "Claude Code (your Claude plan)" }),
+    h("option", { value: "groq", text: "Groq (free API key)" }),
+  );
+  sel.value = settings.computerBrain;
+  sel.addEventListener("change", () => {
+    settings.computerBrain = sel.value === "groq" ? "groq" : "claude";
+    void save();
+  });
+  return sel;
+}
+
+function computerSection(): HTMLElement {
+  return h(
+    "section",
+    {},
+    h("h2", {}, h("span", { text: "Mochi does tasks on your PC" })),
+    h("div", { class: "hint", text: "Tell Mochi what to do (tray icon → \"Mochi: do something on my PC…\") and he does it with his own blue pointer: he looks at the screen, moves your mouse, clicks and types. Press Esc, move the mouse yourself, or use the tray's \"Stop Mochi\" to stop him at any time." }),
+    h("div", { class: "row" },
+      h("label", { text: "Who thinks for Mochi" }),
+      brainPicker(),
+      h("span", { class: "hint", text: "Claude Code uses your Claude plan and is much better at clicking the right thing. Groq is free but slow." }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Let Mochi use my PC" }),
+      toggle(settings.computerUse, (v) => { settings.computerUse = v; void save(); }),
+      h("span", { class: "hint", text: "Off by default. He never types passwords, pays, sends or deletes unless you ask." }),
+    ),
+  );
+}
+
 function speakSection(): HTMLElement {
   const language = h("select", {}) as HTMLSelectElement;
   for (const [code, name] of SPEAK_LANGUAGES) language.append(h("option", { value: code, text: name }));
@@ -714,9 +749,9 @@ function speakSection(): HTMLElement {
       const k = keyRow("groq-api-key", "gsk_…", "No key yet: Knowura Speak needs one.");
       return [k.row, h("div", { class: "row" }, k.dot, k.state), k.feedback];
     })(),
-    h("div", { class: "row" }, h("label", { text: "Model" }), model),
+    h("div", { class: "row" }, h("label", { text: t("Model") }), model),
     h("div", { class: "row" },
-      h("label", { text: "Language" }),
+      h("label", { text: t("Language") }),
       language,
       h("span", { class: "hint", text: "Automatic works for most people" }),
     ),
@@ -1705,6 +1740,7 @@ async function render() {
     layoutSection(),
     islandSection(),
     speakSection(),
+    computerSection(),
     weatherSection(),
     generalSection(),
     shortcutsSection(shortcutReport),

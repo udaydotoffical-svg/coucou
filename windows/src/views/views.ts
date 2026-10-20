@@ -10,6 +10,7 @@ import { Ticker } from "./ticker";
 import { State, type AgentTask } from "../core/state";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
+import { buildAgent } from "./agent";
 import { buildPrompt } from "./chat";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
@@ -108,6 +109,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: tl("Overview"), onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: tl("Ask"), onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const tabDrop = h("button", { class: "tab", title: tl("Drop"), onclick: () => go("upload") }, svg(ICONS.plus, 13));
+  const tabPc = h("button", { class: "tab", title: "Do something on my PC", onclick: () => go("agent") }, svg(ICONS.pointer, 13));
   const tabWeather = h("button", { class: "tab", title: "Weather", onclick: () => go("weather") }, weatherIcon(3, true, 14));
   const chip = h("button", { class: "wx-chip", title: "Weather", onclick: () => go("weather") });
   let chipKey = "";
@@ -128,7 +130,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat, tabDrop, tabWeather),
+    h("div", { class: "tabs" }, tabHome, tabChat, tabDrop, tabPc, tabWeather),
     chip,
     h("div", { class: "header-actions" }, planPills, gearBtn, soundBtn),
   );
@@ -141,6 +143,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
       tabDrop.classList.toggle("on", v === "upload");
+      tabPc.classList.toggle("on", v === "agent");
+      tabPc.style.display = State.settings.computerUse ? "" : "none";
       tabWeather.classList.toggle("on", v === "weather");
       tabWeather.style.display = State.settings.showWeather ? "" : "none";
       // The temperature in the middle of the bar, once there is a city and a forecast.
@@ -416,7 +420,7 @@ export function hasSessionTicker(task: AgentTask): boolean {
 }
 
 function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
-  const label = task.id === "integration_claude" ? "VS Code" : task.name;
+  const label = task.id === "integration_claude" ? "Claude" : task.name;
   const canvas = createMiniBot(task, 24);
   const pill = h(
     "div",
@@ -452,7 +456,7 @@ function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
 /** One of the overview's two small squares: an unselected avatar. Click to select it. */
 function buildSquare(task: AgentTask | null, actions: ViewActions): HTMLElement {
   if (!task) return h("div", { class: "square empty" });
-  const label = task.id === "integration_claude" ? "VS Code" : task.name;
+  const label = task.id === "integration_claude" ? "Claude" : task.name;
   const canvas = createMiniBot(task, 26);
   const sq = h(
     "div",
@@ -518,9 +522,9 @@ function buildPlayer(actions: ViewActions): { el: HTMLElement; sync(): void } {
   const total = h("span", { class: "p-time r" });
   const fill = h("div", { class: "p-fill" });
   const bar = h("div", { class: "p-bar", title: "Seek" }, fill);
-  const prev = h("button", { class: "p-btn", title: "Previous" }, svg(ICONS.skipPrev, 13)) as HTMLButtonElement;
+  const prev = h("button", { class: "p-btn", title: tl("Previous") }, svg(ICONS.skipPrev, 13)) as HTMLButtonElement;
   const play = h("button", { class: "p-btn p-play", title: "Play / pause" }, svg(ICONS.play, 15)) as HTMLButtonElement;
-  const next = h("button", { class: "p-btn", title: "Next" }, svg(ICONS.skipNext, 13)) as HTMLButtonElement;
+  const next = h("button", { class: "p-btn", title: tl("Next") }, svg(ICONS.skipNext, 13)) as HTMLButtonElement;
   const shuffle = h("button", { class: "p-mini", title: "Shuffle" }, svg(ICONS.shuffle, 12, { stroke: 2 })) as HTMLButtonElement;
   const repeat = h("button", { class: "p-mini", title: "Repeat" }, svg(ICONS.repeat, 12, { stroke: 2 })) as HTMLButtonElement;
 
@@ -1075,6 +1079,7 @@ export function buildViews(
   map.set("choose", buildChoose(actions));
   map.set("recap", buildRecap(actions));
   map.set("wardrobe", buildWardrobe(actions));
+  map.set("agent", buildAgent(actions));
   // Not in the Windows v1: sending a file by email, window attach + web result.
   map.set("mail", buildPlaceholder(tl("Sending by email isn't in this version."), ""));
   map.set("searching", buildPlaceholder(tl("Claude is searching…"), ""));

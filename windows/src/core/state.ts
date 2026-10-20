@@ -35,6 +35,8 @@ export interface AgentTask {
   miniEye?: EyeShape | null;
   pillBadge?: PillBadge | null;
   sessionCwd?: string | null;
+  /** The latest session on this pill runs in the Claude desktop app (Claude pill only). */
+  fromDesktop?: boolean;
   /** Claude Code's session, so "Open terminal" can find the window it runs in. */
   sessionId?: string | null;
   /** Claude's final message after Stop, one line; cleared when a new turn starts. */
@@ -213,6 +215,10 @@ export interface Settings {
   speakLanguage: string;
   /** Names and words Whisper should spell your way. */
   speakWords: string;
+  /** Mochi does tasks on this PC with his own blue pointer. */
+  computerUse: boolean;
+  /** Who thinks for him: Claude Code on this PC, or the free Groq API. */
+  computerBrain: "claude" | "groq";
   /** Weather: the chosen city (empty = none yet), where it is, units, and whether to show it. */
   weatherPlace: string;
   weatherLat: number;
@@ -268,6 +274,8 @@ export const DEFAULT_SETTINGS: Settings = {
   speakModel: "whisper-large-v3-turbo",
   speakLanguage: "auto",
   speakWords: "Knowura, Coucou, Mochi",
+  computerUse: false,
+  computerBrain: "claude",
   weatherPlace: "",
   weatherLat: 0,
   weatherLon: 0,
@@ -381,8 +389,14 @@ class AppState {
     return this.tasks.find((t) => t.id === this.focusId) ?? this.tasks[0] ?? null;
   }
 
+  /** Mochi is driving the PC with his blue pointer (src-tauri/src/computer.rs). */
+  computerBusy = false;
+
   get effectiveState(): BotStateName {
-    return this.stateOverride ?? this.focusTask?.state ?? "idle";
+    const own = this.stateOverride ?? this.focusTask?.state ?? "idle";
+    // A card waiting for an answer wins; otherwise he looks busy while his pointer works.
+    if (this.computerBusy && (own === "idle" || own === "finished")) return "working";
+    return own;
   }
 
   get otherTasks(): AgentTask[] {

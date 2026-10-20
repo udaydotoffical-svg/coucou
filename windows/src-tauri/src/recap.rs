@@ -477,6 +477,7 @@ fn agent_id(payload: &Value) -> String {
     let valid = !raw.is_empty()
         && raw.len() <= 24
         && raw != "claude"
+        && raw != "claude-desktop"
         && raw.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     if valid {
         format!("agent_{raw}")
@@ -865,7 +866,7 @@ mod tests {
         // Claude Code in Cursor's terminal is the Cursor pill, as in hooks.ts.
         assert_eq!(agent_id(&json!({ "term_editor": "cursor" })), "agent_cursor");
         // An explicit agent wins over the terminal it runs in.
-        assert_eq!(agent_id(&json!({ "coucou_agent": "claude-desktop", "term_editor": "cursor" })), "agent_claude-desktop");
+        assert_eq!(agent_id(&json!({ "coucou_agent": "claude-desktop", "term_editor": "cursor" })), "agent_cursor");
         assert_eq!(agent_id(&json!({ "coucou_agent": "copilot" })), "agent_copilot");
         assert_eq!(agent_id(&json!({})), "integration_claude");
     }

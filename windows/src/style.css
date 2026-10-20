@@ -2980,3 +2980,92 @@ html[data-dir="rtl"] #views :is(.bubble, .reply .md-p, .reply .md-h, .reply .md-
   unicode-bidi: plaintext;
   text-align: start;
 }
+
+/* ── "Mochi, do something on my PC" (views/agent.ts) ─────────────────────── */
+
+#island {
+  transition: box-shadow 0.45s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+#island.agent {
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.55), 0 10px 34px rgba(59, 130, 246, 0.28);
+}
+
+#content.no-header #header {
+  display: none;
+}
+
+.agent-view {
+  display: flex;
+  align-items: center;
+  padding-left: 66px;
+  padding-right: 18px;
+}
+
+.agent-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.agent-input {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  caret-color: #3b82f6;
+  font: 500 16px/1.2 system-ui, "Segoe UI", sans-serif;
+  padding: 0;
+}
+
+.agent-input::placeholder {
+  color: var(--dim-2);
+}
+
+.agent-hint {
+  font-size: 11px;
+  color: var(--dim-2);
+  transition: color 0.2s ease;
+}
+
+.agent-hint.err {
+  color: #f4505e;
+}
+
+.agent-view.on .agent-field {
+  animation: agent-rise 0.5s cubic-bezier(0.32, 0.72, 0, 1) 0.12s both;
+}
+
+@keyframes agent-rise {
+  from { opacity: 0; transform: translateY(6px); filter: blur(4px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+.agent-view.shake .agent-field {
+  animation: agent-shake 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+
+@keyframes agent-shake {
+  10%, 90% { transform: translateX(-1px); }
+  20%, 80% { transform: translateX(3px); }
+  30%, 50%, 70% { transform: translateX(-6px); }
+  40%, 60% { transform: translateX(6px); }
+}
+
+/* Views come in like iOS: out of a slight blur and scale, on a soft spring curve. The animation
+   ends, so nothing keeps painting once a view has arrived. */
+.view.on {
+  animation: view-in 0.42s cubic-bezier(0.32, 0.72, 0, 1) 0.1s both;
+}
+
+@keyframes view-in {
+  from { opacity: 0; transform: scale(0.965); filter: blur(5px); }
+  to { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view.on, .agent-view.on .agent-field { animation: none; }
+}

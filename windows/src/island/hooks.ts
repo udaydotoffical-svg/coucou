@@ -255,7 +255,9 @@ function handleHook(island: Island, payload: HookPayload) {
   // Route to the right pill. Valid coucou_agent → dynamic "agent_<name>" pill.
   // "claude" is reserved; absent or invalid → Claude Code's own pill: Cursor's
   // when it runs in Cursor's terminal (Mac #120), VS Code's otherwise.
-  const validAgent = validateAgent(payload.coucou_agent);
+  // The Claude desktop app is Claude too: its sessions share the Claude pill.
+  const fromDesktop = payload.coucou_agent === "claude-desktop";
+  const validAgent = fromDesktop ? null : validateAgent(payload.coucou_agent);
   const workspaceId = payload.term_editor === "cursor" ? CURSOR_ID : CLAUDE_ID;
   const agentId = validAgent ? `agent_${validAgent}` : workspaceId;
   const isExternalAgent = validAgent !== null;
@@ -281,6 +283,8 @@ function handleHook(island: Island, payload: HookPayload) {
       if (t && sessionId) t.sessionId = sessionId;
     } else {
       upsert(agentId, projectName, cwd, sessionId);
+      const t = State.tasks.find((x) => x.id === agentId);
+      if (t && agentId === CLAUDE_ID) t.fromDesktop = fromDesktop;
     }
   };
 
@@ -457,7 +461,8 @@ function handleHook(island: Island, payload: HookPayload) {
       // Only Claude Code and the agents the relay can answer for (Codex, Copilot
       // CLI, Muse Code — same as the Mac) get a card. Anyone else's request is
       // declined at once, so the agent asks in its own terminal.
-      if (isExternalAgent && !APPROVAL_AGENTS.has(validAgent!)) {
+      // The Claude desktop app asks in its own window.
+      if (fromDesktop || (isExternalAgent && !APPROVAL_AGENTS.has(validAgent!))) {
         if (payload.request_id) void Bridge.approvalDecline(payload.request_id);
         break;
       }

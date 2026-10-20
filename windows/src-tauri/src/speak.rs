@@ -296,7 +296,7 @@ fn resample_16k(input: &[f32], rate: u32) -> Vec<f32> {
 
 /// Types text into whatever has the focus, one UTF-16 unit at a time (no clipboard involved, so
 /// whatever you had copied stays copied).
-fn type_text(text: &str) {
+pub(crate) fn type_text(text: &str) {
     // The user may still be letting go of Ctrl or Win: typed with one of them down, letters would
     // be shortcuts.
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -716,9 +716,10 @@ mod tests {
         assert_eq!(&wav[36..40], b"data");
         assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 10);
         assert_eq!(wav.len(), 44 + 10);
-        assert_eq!(i16::from_le_bytes(wav[48..50].try_into().unwrap()), 16383);
-        assert_eq!(i16::from_le_bytes(wav[50..52].try_into().unwrap()), -16383);
-        assert_eq!(i16::from_le_bytes(wav[52..54].try_into().unwrap()), 32767);
+        // The samples start at byte 44: 0.0, 0.5, -0.5, 1.0, -1.0.
+        assert_eq!(i16::from_le_bytes(wav[46..48].try_into().unwrap()), 16383);
+        assert_eq!(i16::from_le_bytes(wav[48..50].try_into().unwrap()), -16383);
+        assert_eq!(i16::from_le_bytes(wav[50..52].try_into().unwrap()), 32767);
     }
 
     #[test]

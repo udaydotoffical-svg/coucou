@@ -30,7 +30,6 @@ import { DesktopLink } from "./desktop";
 import { DRAG_THRESHOLD } from "../mochi/desktop-logic";
 
 const BOT_OVERHANG = 40;
-const CLAUDE_DESKTOP_ID = "agent_claude-desktop";
 /** Extra canvas on each side of Mochi, for the witch hat's brim and the Santa hat's tip. */
 const BOT_SIDE = 24;
 /** Same margin as the Rust hit test (src-tauri/src/island.rs). */
@@ -186,7 +185,7 @@ export class Island {
       openTerminal: () => {
         const task = State.focusTask;
         // Sessions from the Claude desktop app live there, not in a terminal.
-        if (task?.id === CLAUDE_DESKTOP_ID) void Bridge.openClaudeDesktop();
+        if (task?.fromDesktop) void Bridge.openClaudeDesktop();
         else void Bridge.openSession(task?.sessionId ?? null, task?.sessionCwd ?? null);
       },
       // The ↗ button — same targets as openAgentTarget() on macOS.
@@ -201,7 +200,7 @@ export class Island {
           integration_notion: "https://notion.so",
           integration_calcom: "https://app.cal.com/bookings",
         };
-        if (task.id === CLAUDE_DESKTOP_ID) void Bridge.openClaudeDesktop();
+        if (task.fromDesktop) void Bridge.openClaudeDesktop();
         else if (task.id === "integration_claude" || task.sessionId) {
           void Bridge.openSession(task.sessionId ?? null, task.sessionCwd ?? null);
         } else if (task.id === "integration_n8n") void Bridge.openN8n();
@@ -436,7 +435,7 @@ export class Island {
    * the chat or the dashboard, and from then on closes the usual ways.
    */
   private syncPin() {
-    const hold = State.mode === "expanded" && UPLOAD_VIEWS.has(State.view);
+    const hold = State.mode === "expanded" && (UPLOAD_VIEWS.has(State.view) || State.view === "agent");
     const pinned = State.isPinned || hold;
     if (this.fsm.pinned === pinned) return;
     this.fsm.pinned = pinned;
@@ -449,6 +448,11 @@ export class Island {
 
   /** A mouse press outside the island: close it, unless something is holding it open. */
   outsidePress() {
+    // The task box is only held open against the pointer wandering off, not against a click away.
+    if (State.mode === "expanded" && State.view === "agent" && !State.isPinned) {
+      this.collapse();
+      return;
+    }
     if (!State.settings.closeOnClickOutside) return;
     if (State.mode !== "expanded" || State.isPinned || this.fsm.pinned || State.knowuraOpen) return;
     if (State.fileDragOver) return;
@@ -773,12 +777,17 @@ export class Island {
       this.width.curveTowards(w, closing ? 420 : 340);
       this.height.curveTowards(h, closing ? 420 : 340);
       this.radius.curveTowards(r, closing ? 420 : 340);
-    } else if (State.mode === "expanded" && State.view === "knowura") {
+    } else if (State.mode === "expanded" && (State.view === "knowura" || State.view === "agent")) {
       // Dynamic-Island feel: the width springs out first and the height follows a
       // beat later with a softer settle, so the shape stretches rather than scales.
       this.width.springTo(w, 0.44, 0.74);
       this.height.springTo(h, 0.62, 0.8);
       this.radius.springTo(r, 0.5, 0.82);
+    } else if (State.mode === "expanded") {
+      // Every other opening stretches the same way, a touch quicker and with less bounce.
+      this.width.springTo(w, 0.4, 0.78);
+      this.height.springTo(h, 0.52, 0.84);
+      this.radius.springTo(r, 0.45, 0.86);
     } else {
       this.width.springTo(w);
       this.height.springTo(h);
@@ -1297,6 +1306,10 @@ export class Island {
     // underneath, so only the header may keep taking clicks up here.
     this.contentEl.style.pointerEvents = live && !this.uploadActive ? "auto" : "none";
     this.header.el.style.pointerEvents = live ? "auto" : "none";
+    // The task box is a single line: no tabs above it, and a blue rim while it is up.
+    const agent = expanded && State.view === "agent";
+    this.contentEl.classList.toggle("no-header", agent);
+    this.islandEl.classList.toggle("agent", agent);
     this.knowuraLoading.style.opacity = expanded && State.view === "knowura" ? "1" : "0";
     this.greetingCanvas.style.display = greetingActive ? "block" : "none";
 
@@ -1316,11 +1329,13 @@ export class Island {
     // The chat is the only view with a text field, so it is the only time the
     // island is allowed to take keyboard focus.
     if (this.lastSyncedView !== State.view) {
-      const wasChat = this.lastSyncedView === "prompt";
+      const typed = (v: IslandViewName | null) => v === "prompt" || v === "agent";
+      const wasChat = typed(this.lastSyncedView);
       this.lastSyncedView = State.view;
-      if (State.view === "prompt") {
+      if (typed(State.view)) {
+        const view = State.view;
         void Bridge.focusWindow(true);
-        window.setTimeout(() => this.views.get("prompt")?.focus?.(), 120);
+        window.setTimeout(() => this.views.get(view)?.focus?.(), 120);
       } else if (wasChat) {
         void Bridge.focusWindow(false);
       }

@@ -109,6 +109,10 @@ pub struct Settings {
     pub speak_model: String,
     pub speak_language: String,
     pub speak_words: String,
+    /// Mochi can do tasks on this PC with his own pointer (computer.rs). Off until you switch it on.
+    pub computer_use: bool,
+    /// Who thinks for Mochi: "claude" (Claude Code on this PC, your Claude plan) or "groq" (the free API).
+    pub computer_brain: String,
 }
 
 pub const ISLAND_WIDTH_MIN: f64 = 560.0;
@@ -143,6 +147,9 @@ impl Settings {
             && (language.len() < 2 || language.len() > 3 || !language.chars().all(|c| c.is_ascii_lowercase()))
         {
             self.speak_language = "auto".into();
+        }
+        if self.computer_brain != "claude" && self.computer_brain != "groq" {
+            self.computer_brain = "claude".into();
         }
         // A short list of words, not a document: Whisper only reads a few hundred characters of it.
         self.speak_words = self.speak_words.chars().filter(|c| !c.is_control()).take(300).collect();
@@ -291,6 +298,8 @@ impl Default for Settings {
             speak_model: "whisper-large-v3-turbo".into(),
             speak_language: "auto".into(),
             speak_words: "Knowura, Coucou, Mochi".into(),
+            computer_use: false,
+            computer_brain: "claude".into(),
         }
     }
 }
@@ -567,7 +576,32 @@ mod tests {
   "mochiOutfit": "witchHat",
   "pillColors": { "integration_claude": "#2DD4BF" },
   "language": "pt-BR",
-  "desktopMochi": { "onDesktop": true, "spot": { "x": 1500.5, "y": -300.0, "space": "screen" } }
+  "desktopMochi": { "onDesktop": true, "spot": { "x": 1500.5, "y": -300.0, "space": "screen" } },
+  "islandWidth": 700.0,
+  "islandHeightExtra": 40.0,
+  "compactHeight": 28.0,
+  "assistantMode": "mochi",
+  "squareSlots": ["integration_notion", ""],
+  "showMusicOnNotch": false,
+  "mochiHeadphones": false,
+  "mochiDances": false,
+  "weatherPlace": "Paris",
+  "weatherLat": 48.85,
+  "weatherLon": 2.35,
+  "weatherFahrenheit": true,
+  "showWeather": false,
+  "showMiniPills": false,
+  "closeOnClickOutside": false,
+  "openOnHover": true,
+  "autoHide": false,
+  "alwaysOnTop": false,
+  "showInTaskbar": true,
+  "speakEnabled": true,
+  "speakModel": "whisper-large-v3",
+  "speakLanguage": "fr",
+  "speakWords": "Coucou",
+  "computerUse": true,
+  "computerBrain": "groq"
 }"##;
 
     fn custom() -> Value {
@@ -970,6 +1004,31 @@ mod tests {
                 "pillColors",
                 "language",
                 "desktopMochi",
+                "islandWidth",
+                "islandHeightExtra",
+                "compactHeight",
+                "assistantMode",
+                "squareSlots",
+                "showMusicOnNotch",
+                "mochiHeadphones",
+                "mochiDances",
+                "weatherPlace",
+                "weatherLat",
+                "weatherLon",
+                "weatherFahrenheit",
+                "showWeather",
+                "showMiniPills",
+                "closeOnClickOutside",
+                "openOnHover",
+                "autoHide",
+                "alwaysOnTop",
+                "showInTaskbar",
+                "speakEnabled",
+                "speakModel",
+                "speakLanguage",
+                "speakWords",
+                "computerUse",
+                "computerBrain",
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);

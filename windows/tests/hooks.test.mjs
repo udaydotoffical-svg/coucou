@@ -347,12 +347,11 @@ test("an agent's last words show when it stops", () => {
   assert.deepEqual(task("agent_hermes").steps, ["All done, tests pass."]);
 });
 
-test("a Claude Desktop session gets the Claude Desktop pill, in its colour (Mac #191)", () => {
+test("a Claude Desktop session shares the Claude pill and is marked as coming from the app", () => {
   hook({ hook_event_name: "SessionStart", cwd: "C:\\p\\proj", session_id: "d1", coucou_agent: "claude-desktop" });
-  const desktop = task("agent_claude-desktop");
-  assert.equal(desktop.color, "#D97757");
-  assert.equal(desktop.sessionId, "d1");
-  assert.equal(task().state, "idle");
+  assert.equal(task("agent_claude-desktop"), undefined);
+  assert.equal(task().sessionId, "d1");
+  assert.equal(task().fromDesktop, true);
   // Its permission requests are answered in the app, as on macOS.
   hook({ hook_event_name: "PermissionRequest", request_id: "r1", coucou_agent: "claude-desktop", tool_name: "Bash" });
   assert.deepEqual(sent("approval_decline"), [{ requestId: "r1" }]);

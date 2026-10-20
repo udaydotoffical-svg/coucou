@@ -31,6 +31,8 @@ mod shortcuts;
 mod tray;
 mod weather;
 #[cfg(windows)]
+mod computer;
+#[cfg(windows)]
 mod speak;
 #[cfg(windows)]
 mod webview_drop;
@@ -92,6 +94,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let settings = settings.sanitized();
     let speak_changed;
+    let computer_changed;
     let (screen_changed, autostart_changed, shortcuts_changed, size_changed, on_top_changed, taskbar_changed, mode_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
@@ -103,6 +106,7 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         let taskbar_changed = current.show_in_taskbar != settings.show_in_taskbar;
         let mode_changed = current.assistant_mode != settings.assistant_mode;
         speak_changed = current.speak_enabled != settings.speak_enabled;
+        computer_changed = current.computer_use != settings.computer_use;
         // Where Mochi sits on the desktop is desktop.rs's to say, not a webview's.
         let mut settings = settings.clone();
         settings.desktop_mochi = current.desktop_mochi.clone();
@@ -129,7 +133,7 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     if mode_changed {
         knowura::apply_mode(&app, settings.assistant_mode == "knowura");
     }
-    if mode_changed || autostart_changed {
+    if mode_changed || autostart_changed || computer_changed {
         tray::refresh(&app);
     }
     if taskbar_changed {
@@ -157,6 +161,26 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     }
     // Keep the other window in step (island ⇄ settings window).
     let _ = app.emit("settings-changed", settings);
+}
+
+/// Mochi's computer use: runs a task (an empty one just closes the box).
+#[tauri::command]
+fn computer_start(app: AppHandle, task: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        computer::start(&app, &task)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, task);
+        Err("Computer use is only on Windows for now.".into())
+    }
+}
+
+#[tauri::command]
+fn computer_stop() {
+    #[cfg(windows)]
+    computer::stop();
 }
 
 /// Opens the Knowura panel ("text" or "voice").
@@ -766,6 +790,8 @@ pub fn run() {
             set_system_languages,
             set_collapsed,
             knowura_open,
+            computer_start,
+            computer_stop,
             knowura_attach,
             knowura_sign_in_browser,
             music_state,

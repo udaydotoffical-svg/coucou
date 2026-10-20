@@ -25,7 +25,8 @@ export type IslandViewName =
   | "knowura"
   | "weather"
   | "recap"
-  | "wardrobe";
+  | "wardrobe"
+  | "agent";
 
 export type BotStateName =
   | "idle"
@@ -104,6 +105,10 @@ export const KNOWURA_ISLAND_H = KNOWURA_PAGE_H + 2 * KNOWURA_BEZEL;
 /** Outer corner radius; the page's own is this minus the bezel, so the curves are concentric. */
 export const KNOWURA_RADIUS = 34;
 
+/** "Mochi, do something on my PC": a wide, short pill with a text field (views/agent.ts). */
+export const AGENT_ISLAND_W = 560;
+export const AGENT_ISLAND_H = 84;
+
 export const ROUNDED_CORNER = 14; // hidden / compact
 export const EXPANDED_CORNER = 22;
 
@@ -138,6 +143,7 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   // to the shared image.
   recap: { height: 184, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   wardrobe: { height: 160, botX: 68, botY: null, botDiameter: 58, agentMode: "none" },
+  agent: { height: AGENT_ISLAND_H, botX: 44, botY: 42, botDiameter: 40, agentMode: "none" },
 };
 
 /** The overview is taller while the music player is in it. */
@@ -171,6 +177,7 @@ export function islandSize(
       return { w: COMPACT_W, h: sizing.compactHeight };
     case "expanded": {
       if (view === "knowura") return { w: KNOWURA_ISLAND_W, h: KNOWURA_ISLAND_H };
+      if (view === "agent") return { w: AGENT_ISLAND_W, h: AGENT_ISLAND_H };
       const base =
         view === "prompt" ? chatPromptHeight(chatCount)
         : view === "overview" && playerShown ? OVERVIEW_WITH_PLAYER

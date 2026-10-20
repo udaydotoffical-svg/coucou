@@ -73,6 +73,12 @@ async function main() {
     else island.knowuraHide();
   });
 
+  // Mochi is driving the PC (computer.rs): his island self looks busy until he is done.
+  await onEvent<boolean>("computer-busy", (busy) => {
+    State.computerBusy = busy;
+    State.notify();
+  });
+
   await onEvent<string>("tray", (what) => {
     switch (what) {
       case "settings":
@@ -90,6 +96,11 @@ async function main() {
       case "wardrobe":
         setPaused(false);
         island.alert("wardrobe");
+        break;
+      // "Mochi: do something on my PC…": the island stretches into the task box.
+      case "computer":
+        setPaused(false);
+        island.alert("agent");
         break;
       case "pause":
         setPaused(!State.paused);

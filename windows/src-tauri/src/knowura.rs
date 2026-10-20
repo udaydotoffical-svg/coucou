@@ -90,6 +90,14 @@ const BRIDGE_JS: &str = r#"
       openApp: function (path) {
         ask('knowura-desk://open?p=' + encodeURIComponent(typeof path === 'string' ? path : '/'));
       },
+      // Mochi does a task on this PC with his own pointer (computer.rs). Only works when the
+      // user switched "Let Mochi use my PC" on, which pcEnabled() tells the page.
+      pcTask: function (text) {
+        if (typeof text === 'string' && text.trim()) {
+          ask('knowura-desk://pc-task?t=' + encodeURIComponent(text.slice(0, 1000)));
+        }
+      },
+      pcEnabled: function () { return __PC_ENABLED__; },
       platform: 'windows'
     })
   });
@@ -229,6 +237,14 @@ fn allow_navigation(app: &AppHandle, url: &Url, bridge: bool) -> bool {
                             .unwrap_or_else(|| "/".into());
                         open_full(app, &path);
                     }
+                    Some("pc-task") => {
+                        let task = url
+                            .query_pairs()
+                            .find(|(k, _)| k == "t")
+                            .map(|(_, v)| v.into_owned())
+                            .unwrap_or_default();
+                        run_pc_task(app, task);
+                    }
                     _ => {}
                 }
             }
@@ -258,6 +274,28 @@ fn permission(webview: tauri::Webview, kind: PermissionKind) -> PermissionRespon
         PermissionKind::Microphone if ours => PermissionResponse::Allow,
         _ => PermissionResponse::Deny,
     }
+}
+
+/// Knowura asked Mochi to do something on this PC: the panel gets out of the way and he starts.
+fn run_pc_task(app: &AppHandle, task: String) {
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        hide(&app);
+        std::thread::spawn(move || {
+            // Let the panel finish folding away so it is not in his first screenshot.
+            std::thread::sleep(Duration::from_millis(900));
+            if let Err(err) = crate::computer::start(&app, &task) {
+                crate::log::line(format!("knowura: PC task refused: {err}"));
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = (app, task);
+}
+
+fn pc_enabled(app: &AppHandle) -> bool {
+    app.try_state::<crate::Shared>().map(|s| s.settings.lock().unwrap().computer_use).unwrap_or(false)
 }
 
 /// The settings both windows share: locked navigation, no pop-ups, microphone-only.
@@ -304,7 +342,9 @@ fn locked<'a>(
         })
         .on_permission_request(permission);
     if bridge {
-        b = b.initialization_script(BRIDGE_JS.replace("__INSTALL_ID__", &install_id()));
+        b = b.initialization_script(BRIDGE_JS
+            .replace("__INSTALL_ID__", &install_id())
+            .replace("__PC_ENABLED__", if pc_enabled(app) { "true" } else { "false" }));
     }
     b
 }
@@ -487,11 +527,7 @@ fn create_panel(app: &AppHandle, mode: Mode) -> tauri::Result<WebviewWindow> {
 
     win.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {
-            let wanted = blur
-                .try_state::<crate::Shared>()
-                .map(|s| s.settings.lock().unwrap().close_on_click_outside)
-                .unwrap_or(true);
-            if !wanted {
+            if !close_on_click_outside(&blur) {
                 return;
             }
             let handle = blur.clone();
@@ -552,14 +588,73 @@ fn reveal(app: &AppHandle, win: &WebviewWindow, mode: Mode) {
             let _ = win3.set_always_on_top(true);
             keep_out_of_taskbars(&app3, PANEL);
             let _ = win3.eval(EXPAND_JS);
-            let k = state(&app3);
-            let mut i = k.inner.lock().unwrap();
-            i.visible = true;
-            i.shown_at = Some(Instant::now());
-            i.loaded = Some(mode);
+            {
+                let k = state(&app3);
+                let mut i = k.inner.lock().unwrap();
+                i.visible = true;
+                i.shown_at = Some(Instant::now());
+                i.loaded = Some(mode);
+            }
+            watch_clicks_outside(&app3);
         });
     });
     log::line(format!("knowura: reveal requested, eval queued: {}", queued.is_ok()));
+}
+
+/// Bumped every time a watcher starts, so an older one stops.
+static CLICK_WATCH: AtomicU64 = AtomicU64::new(0);
+
+/// "Close on click outside": a click anywhere but on the panel folds it away.
+///
+/// Losing the focus is not enough on its own: the island's window around the panel is ours and
+/// does not take the focus, so a click there never reads as "clicking away". While the panel is
+/// up, the mouse buttons are read every 30 ms and a press outside the panel's window hides it.
+/// Nothing runs while the panel is hidden.
+fn watch_clicks_outside(app: &AppHandle) {
+    let gen = CLICK_WATCH.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut was_down = platform::any_button_down();
+        loop {
+            std::thread::sleep(Duration::from_millis(30));
+            if CLICK_WATCH.load(Ordering::SeqCst) != gen || !state(&app).inner.lock().unwrap().visible {
+                return;
+            }
+            let down = platform::any_button_down();
+            let pressed = down && !was_down;
+            was_down = down;
+            if !pressed || !close_on_click_outside(&app) {
+                continue;
+            }
+            let Some(win) = app.get_webview_window(PANEL) else { return };
+            let Some((x, y)) = platform::cursor_physical() else { continue };
+            if inside(&win, x, y) {
+                continue;
+            }
+            // A window of ours that is neither the panel nor the island (the "+" button's file
+            // picker, the sign-in pop-up) is in front: clicks there are not clicking away.
+            let island = app.get_webview_window(island::WINDOW_LABEL);
+            let mut ours: Vec<&WebviewWindow> = vec![&win];
+            if let Some(i) = island.as_ref() {
+                ours.push(i);
+            }
+            if platform::foreground_is_ours() && !platform::foreground_is_one_of(&ours) {
+                continue;
+            }
+            hide(&app);
+            return;
+        }
+    });
+}
+
+fn close_on_click_outside(app: &AppHandle) -> bool {
+    app.try_state::<crate::Shared>().map(|s| s.settings.lock().unwrap().close_on_click_outside).unwrap_or(true)
+}
+
+/// Is this physical screen point on the panel's window?
+fn inside(win: &WebviewWindow, x: f64, y: f64) -> bool {
+    let (Ok(pos), Ok(size)) = (win.outer_position(), win.outer_size()) else { return true };
+    x >= pos.x as f64 && y >= pos.y as f64 && x < pos.x as f64 + size.width as f64 && y < pos.y as f64 + size.height as f64
 }
 
 /// Tells the island to spring open around Knowura (once per opening), and makes

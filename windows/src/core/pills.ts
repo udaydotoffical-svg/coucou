@@ -145,7 +145,12 @@ export function pillDefinition(id: string): PillDefinition | undefined {
   return PILL_CATALOG.find((p) => p.id === id);
 }
 
+/** The Claude desktop app is Claude too: its sessions share the Claude pill (island/hooks.ts), so this
+ *  build does not offer a pill of its own for it. The catalog keeps the Mac's entry and its stable id. */
+const MERGED_INTO_CLAUDE = "agent_claude-desktop";
+
 function offeredOn(def: PillDefinition, os: HostOs): boolean {
+  if (def.id === MERGED_INTO_CLAUDE) return false;
   return def.support === "yes" || def.support === "soon" || (def.support === "windows" && os === "windows");
 }
 
