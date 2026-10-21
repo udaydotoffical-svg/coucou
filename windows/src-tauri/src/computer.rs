@@ -324,6 +324,7 @@ struct Turn {
 enum Brain {
     Groq(GroqBrain),
     Claude(ClaudeBrain),
+    OpenCode(OpenCodeBrain),
 }
 
 impl Brain {
@@ -331,12 +332,41 @@ impl Brain {
         match self {
             Brain::Groq(b) => b.ask(turn, runner, app).await,
             Brain::Claude(b) => b.ask(turn, runner).await,
+            Brain::OpenCode(b) => b.ask(turn, runner).await,
         }
     }
 }
 
-fn brain_wanted(app: &AppHandle) -> String {
-    app.try_state::<crate::Shared>().map(|s| s.settings.lock().unwrap().computer_brain.clone()).unwrap_or_else(|| "claude".into())
+/// Who thinks for Mochi.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Claude,
+    OpenCode,
+    Groq,
+}
+
+/// The setting as it stands: the brain ("main" follows the main pill) and OpenCode's model.
+fn brain_setting(app: &AppHandle) -> (String, String, String) {
+    app.try_state::<crate::Shared>()
+        .map(|s| {
+            let s = s.settings.lock().unwrap();
+            (s.computer_brain.clone(), s.main_pill.clone(), s.computer_opencode_model.clone())
+        })
+        .unwrap_or_else(|| ("main".into(), String::new(), String::new()))
+}
+
+/// What the choice means: "main" is the agent of the main pill (Claude Code or OpenCode; anything
+/// else has no way to look at a screenshot here and falls back to Claude Code).
+fn wanted_kind(brain: &str, main_pill: &str) -> Kind {
+    match brain {
+        "claude" => Kind::Claude,
+        "opencode" => Kind::OpenCode,
+        "groq" => Kind::Groq,
+        _ => match main_pill {
+            "agent_opencode" => Kind::OpenCode,
+            _ => Kind::Claude,
+        },
+    }
 }
 
 /// The kept conversation, when it can still be used; otherwise it is ended.
@@ -368,39 +398,50 @@ fn find_claude() -> Option<std::path::PathBuf> {
 }
 
 async fn run(app: &AppHandle, task: &str) -> Result<String, String> {
-    // Claude Code when it is wanted and installed; otherwise Groq, when there is a key for it.
-    let mut want_claude = brain_wanted(app) != "groq";
+    // The wanted brain when it is there; otherwise the next one that is (Claude Code, OpenCode, Groq).
+    let (setting, main_pill, oc_model) = brain_setting(app);
     let claude_path = find_claude();
+    let opencode_path = find_opencode();
     let groq_key = secrets::get("groq-api-key");
-    if want_claude && claude_path.is_none() {
-        if groq_key.is_none() {
-            return Err("Claude Code is not installed on this PC. Install it (claude.com/claude-code), or pick Groq in Settings and add its key.".into());
-        }
-        log::line("computer: Claude Code was not found, using Groq".to_string());
-        want_claude = false;
-    }
-    if !want_claude && groq_key.is_none() {
-        return Err("Add your Groq API key in Settings first (the one Knowura Speak uses), or pick Claude Code.".into());
+    let available = |k: Kind| match k {
+        Kind::Claude => claude_path.is_some(),
+        Kind::OpenCode => opencode_path.is_some(),
+        Kind::Groq => groq_key.is_some(),
+    };
+    let wanted = wanted_kind(&setting, &main_pill);
+    let kind = [wanted, Kind::Claude, Kind::OpenCode, Kind::Groq].into_iter().find(|k| available(*k)).ok_or_else(|| {
+        "Mochi needs a brain: install Claude Code or OpenCode, or add your Groq key in Settings.".to_string()
+    })?;
+    if kind != wanted {
+        log::line(format!("computer: {wanted:?} is not there, using {kind:?}"));
     }
 
-    let screen = if want_claude { screen(1280.0, 1_000_000.0) } else { screen(1024.0, 700_000.0) };
+    let screen = if kind == Kind::Groq { screen(1024.0, 700_000.0) } else { screen(1280.0, 1_000_000.0) };
     let mut runner = Runner { app: app.clone(), screen, last: home_spot(), ignore_esc_until: Instant::now() };
     let system = format!("{SYSTEM}\nThe screenshot is {} x {} pixels.", screen.tw, screen.th);
 
     let mut reused = false;
-    let mut brain = if want_claude {
-        let kept = take_claude(&system).await;
-        reused = kept.is_some();
-        Brain::Claude(match kept {
-            Some(b) => b,
-            None => ClaudeBrain::start(claude_path.as_deref().unwrap(), &system).await?,
-        })
-    } else {
-        Brain::Groq(GroqBrain::start(groq_key.as_deref().unwrap(), &system).await?)
+    let mut brain = match kind {
+        Kind::Claude => {
+            let kept = take_claude(&system).await;
+            reused = kept.is_some();
+            Brain::Claude(match kept {
+                Some(b) => b,
+                None => ClaudeBrain::start(claude_path.as_deref().unwrap(), &system).await?,
+            })
+        }
+        Kind::OpenCode => {
+            let kept = take_opencode(&system, &oc_model).await;
+            reused = kept.is_some();
+            Brain::OpenCode(match kept {
+                Some(b) => b,
+                None => OpenCodeBrain::start(opencode_path.as_deref().unwrap(), &system, &oc_model)?,
+            })
+        }
+        Kind::Groq => Brain::Groq(GroqBrain::start(groq_key.as_deref().unwrap(), &system).await?),
     };
     log::line(format!(
-        "computer: task started ({}{}) on {}x{}",
-        if want_claude { "Claude Code" } else { "Groq" },
+        "computer: task started ({kind:?}{}) on {}x{}",
         if reused { ", same chat" } else { "" },
         screen.sw,
         screen.sh
@@ -441,8 +482,10 @@ async fn run(app: &AppHandle, task: &str) -> Result<String, String> {
         let action = act["action"].as_str().unwrap_or("");
         if action == "done" {
             // The chat stays open for the next task (one chat, never a new one each time).
-            if let Brain::Claude(b) = brain {
-                stash_claude(b).await;
+            match brain {
+                Brain::Claude(b) => stash_claude(b).await,
+                Brain::OpenCode(b) => stash_opencode(b).await,
+                Brain::Groq(_) => {}
             }
             return Ok(act["message"].as_str().unwrap_or("Done.").to_string());
         }
@@ -546,6 +589,277 @@ impl ClaudeBrain {
             }
         }
     }
+}
+
+
+// ── Brain 3: OpenCode, one run per step ───────────────────────────────────────
+
+/// `opencode run` once per step, on one session that is kept between steps and tasks (so OpenCode
+/// never fills up with chats). The screenshot goes in as an attached file. A private project
+/// config (the work folder's opencode.json) gives it an agent called "mochi" with no tools at all
+/// and every permission denied, and `--pure` keeps every plugin out: it can only look and answer.
+struct OpenCodeBrain {
+    exe: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    model: String,
+    system: String,
+    session: Option<String>,
+    turns: usize,
+    last_used: Instant,
+    shot: usize,
+}
+
+/// The built-in tools OpenCode has: all off for Mochi.
+const OPENCODE_TOOLS: &[&str] = &[
+    "bash", "edit", "write", "read", "grep", "glob", "list", "patch", "webfetch", "websearch",
+    "todowrite", "todoread", "task", "skill", "lsp",
+];
+
+/// A JSONC file as plain JSON: comments out, strings left alone.
+fn strip_jsonc(text: &str) -> String {
+    let (mut out, mut chars) = (String::with_capacity(text.len()), text.chars().peekable());
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    // Trailing commas are legal in JSONC.
+    let mut cleaned = String::with_capacity(out.len());
+    let bytes: Vec<char> = out.chars().collect();
+    let mut in_str = false;
+    for (i, &c) in bytes.iter().enumerate() {
+        if in_str {
+            cleaned.push(c);
+            if c == '"' && bytes.get(i.wrapping_sub(1)) != Some(&'\\') {
+                in_str = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_str = true;
+        } else if c == ',' {
+            let next = bytes[i + 1..].iter().find(|n| !n.is_whitespace());
+            if matches!(next, Some('}') | Some(']')) {
+                continue;
+            }
+        }
+        cleaned.push(c);
+    }
+    cleaned
+}
+
+/// The MCP servers the user's own OpenCode config has: Mochi gets none of their tools.
+fn opencode_mcp_names() -> Vec<String> {
+    let dir = platform::home_dir().join(".config").join("opencode");
+    for file in ["opencode.jsonc", "opencode.json", "config.json"] {
+        let Ok(text) = std::fs::read_to_string(dir.join(file)) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&strip_jsonc(&text)) else { continue };
+        if let Some(map) = v.get("mcp").and_then(Value::as_object) {
+            return map.keys().cloned().collect();
+        }
+    }
+    Vec::new()
+}
+
+/// The project config Mochi's runs read: his agent, no tools, every permission denied.
+fn opencode_config(system: &str, mcp: &[String]) -> Value {
+    let mut tools = serde_json::Map::new();
+    for t in OPENCODE_TOOLS {
+        tools.insert((*t).into(), json!(false));
+    }
+    let mut servers = serde_json::Map::new();
+    for name in mcp {
+        tools.insert(format!("{name}_*"), json!(false));
+        servers.insert(name.clone(), json!({ "enabled": false }));
+    }
+    let mut config = json!({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": { "edit": "deny", "bash": "deny", "webfetch": "deny" },
+        "agent": { "mochi": {
+            "description": "Mochi drives the PC from screenshots",
+            "mode": "primary",
+            "prompt": system,
+            "tools": tools,
+        } },
+    });
+    if !servers.is_empty() {
+        config["mcp"] = Value::Object(servers);
+    }
+    config
+}
+
+/// Where OpenCode is installed, if it is (the desktop app brings its own `opencode-cli.exe`).
+fn find_opencode() -> Option<std::path::PathBuf> {
+    platform::find_on_path("opencode").or_else(|| platform::find_on_path("opencode-cli")).or_else(|| {
+        let local = platform::local_dir();
+        let home = platform::home_dir();
+        let appdata = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or(local);
+        [
+            appdata.join("OpenCode").join("opencode-cli.exe"),
+            home.join(".opencode").join("bin").join("opencode.exe"),
+            std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_default().join("npm").join("opencode.cmd"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+    })
+}
+
+impl OpenCodeBrain {
+    fn start(exe: &std::path::Path, system: &str, model: &str) -> Result<OpenCodeBrain, String> {
+        let dir = platform::local_dir().join("computer").join("opencode");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Could not prepare OpenCode's folder: {e}"))?;
+        let config = opencode_config(system, &opencode_mcp_names());
+        std::fs::write(dir.join("opencode.json"), serde_json::to_vec_pretty(&config).unwrap_or_default())
+            .map_err(|e| format!("Could not write OpenCode's config: {e}"))?;
+        Ok(OpenCodeBrain {
+            exe: exe.to_path_buf(),
+            dir,
+            model: model.to_string(),
+            system: system.to_string(),
+            session: None,
+            turns: 0,
+            last_used: Instant::now(),
+            shot: 0,
+        })
+    }
+
+    fn reusable(&self, system: &str, model: &str) -> bool {
+        self.system == system && self.model == model && self.turns < CLAUDE_MAX_TURNS && self.last_used.elapsed() < CLAUDE_IDLE
+    }
+
+    async fn ask(&mut self, turn: Turn, runner: &Runner) -> Result<String, String> {
+        self.turns += 1;
+        let mut cmd = tokio::process::Command::new(&self.exe);
+        cmd.arg("run").arg(&turn.text);
+        cmd.args(["--format", "json", "--pure", "--agent", "mochi"]);
+        if !self.model.is_empty() {
+            cmd.args(["-m", &self.model]);
+        }
+        if let Some(id) = &self.session {
+            cmd.args(["--session", id]);
+        }
+        if let Some(png) = &turn.image {
+            self.shot += 1;
+            let file = self.dir.join(format!("screen-{}.png", self.shot % 2));
+            std::fs::write(&file, png).map_err(|e| format!("Could not save the screenshot: {e}"))?;
+            // `--file` takes a list: with "=" the message is not read as one more file.
+            cmd.arg(format!("--file={}", file.display()));
+        }
+        cmd.current_dir(&self.dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let mut child = cmd.spawn().map_err(|e| format!("Could not start OpenCode: {e}"))?;
+        let stdout = child.stdout.take().ok_or("OpenCode has no output")?;
+        let mut stderr = child.stderr.take();
+        let mut lines = BufReader::new(stdout).lines();
+
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut text = String::new();
+        let mut error: Option<String> = None;
+        loop {
+            if runner.stopped() {
+                return Err("Stopped.".into());
+            }
+            if Instant::now() > deadline {
+                return Err("OpenCode took too long to answer.".into());
+            }
+            let line = match tokio::time::timeout(Duration::from_millis(250), lines.next_line()).await {
+                Err(_) => continue,
+                Ok(r) => r.map_err(|e| format!("OpenCode closed: {e}"))?,
+            };
+            let Some(line) = line else { break };
+            let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+            if let Some(id) = event["sessionID"].as_str() {
+                self.session.get_or_insert_with(|| id.to_string());
+            }
+            match event["type"].as_str() {
+                Some("text") => {
+                    if let Some(t) = event["part"]["text"].as_str() {
+                        text.push_str(t);
+                    }
+                }
+                Some("error") => {
+                    let data = &event["error"]["data"];
+                    error = Some(
+                        data["message"]
+                            .as_str()
+                            .or_else(|| event["error"]["name"].as_str())
+                            .unwrap_or("OpenCode returned an error")
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        let _ = child.wait().await;
+        if text.trim().is_empty() {
+            if let Some(e) = error {
+                // A session that fails once is not worth keeping.
+                self.session = None;
+                return Err(format!("OpenCode: {e}"));
+            }
+            let mut tail = String::new();
+            if let Some(err) = stderr.as_mut() {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let _ = tokio::time::timeout(Duration::from_millis(300), err.read_to_end(&mut buf)).await;
+                tail = String::from_utf8_lossy(&buf).lines().next().unwrap_or("").to_string();
+            }
+            return Err(format!("OpenCode gave no answer. {tail}").trim().to_string());
+        }
+        self.last_used = Instant::now();
+        Ok(text)
+    }
+}
+
+static OPENCODE_BRAIN: tokio::sync::Mutex<Option<OpenCodeBrain>> = tokio::sync::Mutex::const_new(None);
+
+async fn take_opencode(system: &str, model: &str) -> Option<OpenCodeBrain> {
+    let b = OPENCODE_BRAIN.lock().await.take()?;
+    b.reusable(system, model).then_some(b)
+}
+
+async fn stash_opencode(mut b: OpenCodeBrain) {
+    b.last_used = Instant::now();
+    *OPENCODE_BRAIN.lock().await = Some(b);
 }
 
 // ── Brain 2: a vision model on Groq's free tier ──────────────────────────────
@@ -1310,6 +1624,33 @@ mod tests {
     fn a_reasoning_models_thoughts_are_not_the_answer() {
         let act = parse_action("<think>maybe {\"a\":1}?</think>{\"action\":\"done\",\"message\":\"ok\"}").unwrap();
         assert_eq!(act["action"], "done");
+    }
+
+    #[test]
+    fn the_main_agent_decides_who_thinks() {
+        assert_eq!(wanted_kind("main", "agent_opencode"), Kind::OpenCode);
+        assert_eq!(wanted_kind("main", "integration_claude"), Kind::Claude);
+        // An agent that cannot look at a screenshot here falls back to Claude Code.
+        assert_eq!(wanted_kind("main", "agent_cursor"), Kind::Claude);
+        assert_eq!(wanted_kind("groq", "agent_opencode"), Kind::Groq);
+        assert_eq!(wanted_kind("opencode", "integration_claude"), Kind::OpenCode);
+    }
+
+    #[test]
+    fn opencodes_json_with_comments_is_read() {
+        let text = "{\n  // a comment\n  \"mcp\": { \"vercel\": { \"url\": \"https://a//b\" /* x */ }, }, \n}";
+        let v: Value = serde_json::from_str(&strip_jsonc(text)).unwrap();
+        assert_eq!(v["mcp"]["vercel"]["url"], "https://a//b");
+    }
+
+    #[test]
+    fn mochis_opencode_agent_has_no_tools_and_no_mcp() {
+        let c = opencode_config("sys", &["vercel".to_string()]);
+        assert_eq!(c["permission"]["bash"], "deny");
+        assert_eq!(c["agent"]["mochi"]["tools"]["bash"], false);
+        assert_eq!(c["agent"]["mochi"]["tools"]["vercel_*"], false);
+        assert_eq!(c["mcp"]["vercel"]["enabled"], false);
+        assert_eq!(c["agent"]["mochi"]["prompt"], "sys");
     }
 
     #[test]

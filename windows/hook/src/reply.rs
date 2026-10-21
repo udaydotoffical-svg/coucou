@@ -9,10 +9,10 @@
 use serde_json::{json, Map, Value};
 
 /// The agents whose permission requests the island can answer: Claude Code
-/// (no `--agent`), Codex, Copilot CLI and Muse Code. Any decision for another
+/// (no `--agent`), Codex, Copilot CLI, Muse Code and OpenCode. Any decision for another
 /// agent is ignored here too, whatever the app sent.
 pub fn takes_decisions(agent: &str) -> bool {
-    matches!(agent, "" | "codex" | "copilot" | "muse")
+    matches!(agent, "" | "codex" | "copilot" | "muse" | "opencode")
 }
 
 /// Agents that read a JSON object on stdout after every hook and get `{}` —
@@ -49,6 +49,13 @@ pub fn stdout(agent: &str, event: &str, decision: Option<&str>, question: Option
                 None => None,
             }
         }
+        // OpenCode's plugin (permission.ask) reads a plain verdict. Without a click: silence, and
+        // OpenCode asks in its own terminal.
+        "opencode" => match decision.map(str::trim) {
+            Some("allow" | "always") => Some(r#"{"permission":"allow"}"#.to_string()),
+            Some("deny") => Some(r#"{"permission":"deny"}"#.to_string()),
+            _ => None,
+        },
         // Claude Code and Codex share the documented hookSpecificOutput. Only
         // Claude Code asks questions.
         "" => decision.and_then(|d| decision_json(d, question)),
@@ -217,6 +224,18 @@ mod tests {
         }
         // Hermes approvals are not supported: its decisions are never relayed.
         assert_eq!(stdout("hermes", "PermissionRequest", Some("allow"), None), None);
+    }
+
+    #[test]
+    fn opencode_gets_a_plain_verdict_only_from_a_click() {
+        assert_eq!(stdout("opencode", "PermissionRequest", Some("allow"), None).as_deref(), Some(r#"{"permission":"allow"}"#));
+        assert_eq!(stdout("opencode", "PermissionRequest", Some("always"), None).as_deref(), Some(r#"{"permission":"allow"}"#));
+        assert_eq!(stdout("opencode", "PermissionRequest", Some("deny"), None).as_deref(), Some(r#"{"permission":"deny"}"#));
+        // Nobody clicked, or something else came back: silence, and OpenCode asks in its own terminal.
+        assert_eq!(stdout("opencode", "PermissionRequest", None, None), None);
+        assert_eq!(stdout("opencode", "PermissionRequest", Some("maybe"), None), None);
+        // Other events print nothing for it.
+        assert_eq!(stdout("opencode", "PreToolUse", Some("allow"), None), None);
     }
 
     #[test]

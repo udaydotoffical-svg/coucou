@@ -236,7 +236,9 @@ export interface Settings {
   /** Mochi does tasks on this PC with his own blue pointer. */
   computerUse: boolean;
   /** Who thinks for him: Claude Code on this PC, or the free Groq API. */
-  computerBrain: "claude" | "groq";
+  computerBrain: "main" | "claude" | "opencode" | "groq";
+  /** The model OpenCode uses for him, "provider/model" (empty: OpenCode's default). */
+  computerOpencodeModel: string;
   /** Weather: the chosen city (empty = none yet), where it is, units, and whether to show it. */
   weatherPlace: string;
   weatherLat: number;
@@ -294,7 +296,8 @@ export const DEFAULT_SETTINGS: Settings = {
   speakLanguage: "auto",
   speakWords: "Knowura, Coucou, Mochi",
   computerUse: false,
-  computerBrain: "claude",
+  computerBrain: "main",
+  computerOpencodeModel: "",
   weatherPlace: "",
   weatherLat: 0,
   weatherLon: 0,

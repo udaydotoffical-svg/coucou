@@ -112,8 +112,11 @@ pub struct Settings {
     pub speak_words: String,
     /// Mochi can do tasks on this PC with his own pointer (computer.rs). Off until you switch it on.
     pub computer_use: bool,
-    /// Who thinks for Mochi: "claude" (Claude Code on this PC, your Claude plan) or "groq" (the free API).
+    /// Who thinks for Mochi: "main" (the agent of your main pill: Claude Code or OpenCode), "claude",
+    /// "opencode", or "groq" (the free API).
     pub computer_brain: String,
+    /// The model OpenCode uses for Mochi, "provider/model"; empty = OpenCode's own default. It has to see images.
+    pub computer_opencode_model: String,
     /// Mochi reacts to the PC: he sweats when the processor is busy, puffs up when memory is short,
     /// gets tired on a low battery (vitals.rs).
     pub mochi_feels_pc: bool,
@@ -182,9 +185,10 @@ impl Settings {
         {
             self.speak_language = "auto".into();
         }
-        if self.computer_brain != "claude" && self.computer_brain != "groq" {
-            self.computer_brain = "claude".into();
+        if !["main", "claude", "opencode", "groq"].contains(&self.computer_brain.as_str()) {
+            self.computer_brain = "main".into();
         }
+        self.computer_opencode_model = self.computer_opencode_model.chars().filter(|c| !c.is_control() && !c.is_whitespace()).take(120).collect();
         // A short list of words, not a document: Whisper only reads a few hundred characters of it.
         self.speak_words = self.speak_words.chars().filter(|c| !c.is_control()).take(300).collect();
         self
@@ -333,7 +337,8 @@ impl Default for Settings {
             speak_language: "auto".into(),
             speak_words: "Knowura, Coucou, Mochi".into(),
             computer_use: false,
-            computer_brain: "claude".into(),
+            computer_brain: "main".into(),
+            computer_opencode_model: String::new(),
             mochi_feels_pc: true,
             phone_link: false,
             phone_chat: false,
@@ -734,6 +739,7 @@ mod tests {
   "speakWords": "Coucou",
   "computerUse": true,
   "computerBrain": "groq",
+  "computerOpencodeModel": "ailol/anthropic/claude-3-haiku",
   "mochiFeelsPc": false,
   "phoneLink": true,
   "phoneChat": true,
@@ -1267,6 +1273,7 @@ mod tests {
                 "speakWords",
                 "computerUse",
                 "computerBrain",
+                "computerOpencodeModel",
                 "mochiFeelsPc",
                 "phoneLink",
                 "phoneChat",

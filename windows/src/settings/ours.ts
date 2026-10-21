@@ -307,15 +307,36 @@ const speakLanguages = (): [string, string][] => [
 export function brainPicker(): HTMLElement {
   const sel = h("select", {}) as HTMLSelectElement;
   sel.append(
-    h("option", { value: "claude", text: "Claude Code (your Claude plan)" }),
+    h("option", { value: "main", text: "My main agent (Claude Code or OpenCode)" }),
+    h("option", { value: "claude", text: "Claude Code" }),
+    h("option", { value: "opencode", text: "OpenCode" }),
     h("option", { value: "groq", text: "Groq (free API key)" }),
   );
   sel.value = S().computerBrain;
   sel.addEventListener("change", () => {
-    S().computerBrain = sel.value === "groq" ? "groq" : "claude";
+    S().computerBrain = sel.value as Settings["computerBrain"];
     void save();
   });
   return sel;
+}
+
+function opencodeModelRow(): HTMLElement {
+  const input = h("input", {
+    type: "text",
+    value: S().computerOpencodeModel,
+    placeholder: "provider/model (empty = OpenCode's own default)",
+    style: "flex:1 1 auto;min-width:0",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+  input.addEventListener("change", () => {
+    S().computerOpencodeModel = input.value.replace(/\s+/g, "").slice(0, 120);
+    void save();
+  });
+  return h("div", { class: "row" },
+    h("label", { text: "OpenCode model" }),
+    input,
+    h("span", { class: "hint", text: "It has to see images (for example a Claude or GPT model)." }),
+  );
 }
 
 export function computerSection(): HTMLElement {
@@ -327,8 +348,9 @@ export function computerSection(): HTMLElement {
     h("div", { class: "row" },
       h("label", { text: "Who thinks for Mochi" }),
       brainPicker(),
-      h("span", { class: "hint", text: "Claude Code uses your Claude plan and is much better at clicking the right thing. Groq is free but slow." }),
+      h("span", { class: "hint", text: "Your main agent (Active pills) does the thinking when it is Claude Code or OpenCode. Groq is free but slow." }),
     ),
+    opencodeModelRow(),
     h("div", { class: "row" },
       h("label", { text: "Let Mochi use my PC" }),
       toggle(S().computerUse, (v) => { S().computerUse = v; void save(); }),

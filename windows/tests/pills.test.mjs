@@ -127,9 +127,9 @@ test("no chat provider that works here says Coming soon", () => {
   assert.equal(pillDefinition("ai_google").connect.key, "google-api-key");
 });
 
-test("the main pill is a workspace tool that works here", () => {
+test("the main pill is a workspace tool that works here, or OpenCode (which can drive Mochi's computer use)", () => {
   assert.deepEqual(mainPillChoices("linux").map((p) => p.id), [
-    "integration_claude", "agent_cursor", "agent_antigravity", "agent_codex",
+    "integration_claude", "agent_cursor", "agent_antigravity", "agent_codex", "agent_opencode",
   ]);
   assert.equal(DEFAULT_MAIN_PILL, "integration_claude");
 });

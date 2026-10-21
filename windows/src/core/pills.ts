@@ -178,7 +178,9 @@ export function isHookPill(id: string): boolean {
 
 /** Workspace tools that can be the main pill. */
 export function mainPillChoices(os: HostOs = HOST_OS): PillDefinition[] {
-  return availablePills(os).filter((p) => p.category === "workspace" && p.support !== "soon");
+  // OpenCode can be the main agent here too: the computer use (computer.rs) follows the main agent,
+  // and OpenCode is one of the two that can drive it. The catalog keeps the Mac's category for it.
+  return availablePills(os).filter((p) => (p.category === "workspace" || p.id === "agent_opencode") && p.support !== "soon");
 }
 
 /** PillDefinition.sessionSubtitle — next to the name in a live session's card. */
