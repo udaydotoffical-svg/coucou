@@ -1,0 +1,12 @@
+[project]
+name = "coucou-python"
+version = "0.5.1"
+description = "Coucou for Windows: the Python backend (the web UI in ../windows is unchanged)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+host = ["PySide6-Essentials>=6.7", "PySide6-Addons>=6.7"]
+
+[tool.setuptools.packages.find]
+include = ["coucou*"]
